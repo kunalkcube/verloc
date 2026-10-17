@@ -428,4 +428,6 @@ scripts/                 Release build and catalog tooling
 
 ## License
 
-No license file is currently included in this repository. Do not assume permission to redistribute or offer it as an open-source dependency; obtain licensing terms from the maintainer first.
+Released under the [MIT License](LICENSE).
+
+Copyright (c) 2026 Kunal Kongkan Kashyap.
