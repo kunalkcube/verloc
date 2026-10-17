@@ -4,6 +4,8 @@ A self-hosted, OpenAI-compatible LLM gateway with an embedded operations dashboa
 
 verloc runs as a single Go binary. SQLite stores management state and analytics; the React dashboard is embedded in the binary. Node.js is a build dependency, not a runtime dependency. No external database, Redis, or separate dashboard server is required.
 
+![verloc dashboard — Overview](assets/overview.png)
+
 ## Capabilities
 
 - **Routing:** public model aliases, ordered provider fallbacks, credential rotation, and per-provider cooldowns.
