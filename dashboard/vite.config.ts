@@ -17,5 +17,16 @@ export default defineConfig({
   build: {
     outDir: '../internal/server/static',
     emptyOutDir: true,
+    rollupOptions: {
+      output: {
+        // Split the heavy, rarely-first-paint dependencies out of the
+        // entry chunk: the login screen used to download all of Recharts.
+        manualChunks: (id) => {
+          if (id.includes('node_modules/recharts')) return 'charts';
+          if (id.includes('node_modules/lucide-react')) return 'icons';
+          return undefined;
+        },
+      },
+    },
   },
 })

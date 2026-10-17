@@ -726,6 +726,10 @@ type hintResolver struct {
 	or      cachedIndex
 	md      cachedIndex
 	litellm cachedIndex
+
+	// fetching marks sources with a refresh already in flight, so N
+	// concurrent callers cannot each launch their own multi-MB fetch.
+	fetching map[string]bool
 }
 
 func newHintResolver() *hintResolver {
@@ -777,16 +781,34 @@ func (h *hintResolver) hintsFor(ctx context.Context, cfg *Config, upstreams []st
 	refresh := func(cur cachedIndex, ttl time.Duration, set func(cachedIndex), fetch func(context.Context) ([]catalogEntry, error), label string) {
 		h.mu.Lock()
 		stale := !h.fresh(cur, ttl)
-		h.mu.Unlock()
-		if !stale {
+		if h.fetching == nil {
+			h.fetching = map[string]bool{}
+		}
+		if !stale || h.fetching[label] {
+			h.mu.Unlock()
 			return
 		}
+		h.fetching[label] = true
+		h.mu.Unlock()
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			list, err := fetch(ctx)
+			defer func() {
+				h.mu.Lock()
+				delete(h.fetching, label)
+				h.mu.Unlock()
+			}()
+			// WithoutCancel: with cache-first serving the caller may
+			// return (and cancel) while this refresh is still running.
+			list, err := fetch(context.WithoutCancel(ctx))
 			if err != nil {
 				log.Printf("[admin] %s hint fetch failed: %v", label, err)
+				return
+			}
+			// D9: an empty-but-successful fetch must not blank every hint
+			// for the whole TTL — keep the previous index.
+			if len(list) == 0 {
+				log.Printf("[admin] %s hint fetch returned no entries; keeping previous hints", label)
 				return
 			}
 			set(cachedIndex{at: time.Now(), idx: indexCatalog(list)})
@@ -822,12 +844,21 @@ func (h *hintResolver) hintsFor(ctx context.Context, cfg *Config, upstreams []st
 		h.mu.Unlock()
 	}, func(ctx context.Context) ([]catalogEntry, error) { return fetchLiteLLM(ctx, litellmURL) }, "litellm")
 
-	done := make(chan struct{})
-	go func() { wg.Wait(); close(done) }()
-	select {
-	case <-done:
-	case <-ctx.Done():
-	case <-time.After(hintFetchOverallLimit):
+	// Cache-first: when any catalog is already cached (even stale), serve
+	// it immediately and let the refresh finish in the background — the
+	// caller used to block up to hintFetchOverallLimit on the slowest of
+	// four network fetches. Only a cold resolver waits.
+	h.mu.Lock()
+	haveCache := h.vercel.idx.byID != nil || h.or.idx.byID != nil || h.md.idx.byID != nil || h.litellm.idx.byID != nil
+	h.mu.Unlock()
+	if !haveCache {
+		done := make(chan struct{})
+		go func() { wg.Wait(); close(done) }()
+		select {
+		case <-done:
+		case <-ctx.Done():
+		case <-time.After(hintFetchOverallLimit):
+		}
 	}
 	h.mu.Lock()
 	defer h.mu.Unlock()

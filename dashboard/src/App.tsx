@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { lazy, Suspense, useEffect, useMemo, useState } from 'react';
 import {
   Activity,
   Bell,
@@ -19,18 +19,20 @@ import {
   TriangleAlert,
   type LucideIcon,
 } from 'lucide-react';
-import { getState, getSeriesSince, getAlerts, getKeyEvents, connectLive, logout, RANGE_PRESETS, fmtMs, fmtMoney, fmtInt, fmtTokens, type State, type SeriesPoint, type RangePreset, type ReqRecord, type AlertEvent, type KeyEvent, type TabProps } from './api';
+import { getState, getSeriesSince, getAlerts, getKeyEvents, connectLive, logout, RANGE_PRESETS, fmtMs, fmtMoney, fmtInt, fmtTokens, type State, type SeriesPoint, type RangePreset, type AlertEvent, type KeyEvent, type TabProps } from './api';
 import { rollupSeries, rangeSince, fmtSpan } from './window';
 import Overview from './tabs/Overview';
 import Requests from './tabs/Requests';
 import Backends from './tabs/Backends';
 import Keys from './tabs/Keys';
 import Alerts from './tabs/Alerts';
-import Admin from './tabs/Admin';
 import ClientKeys from './tabs/ClientKeys';
-import Analytics from './tabs/Analytics';
 import Settings from './tabs/Settings';
-import Docs from './tabs/Docs';
+// Heavy tabs load on demand: Admin (1.7k lines), Analytics (Recharts) and
+// Docs are never needed for first paint or the login screen.
+const Admin = lazy(() => import('./tabs/Admin'));
+const Analytics = lazy(() => import('./tabs/Analytics'));
+const Docs = lazy(() => import('./tabs/Docs'));
 import Auth from './components/Auth';
 import { MicroSlats } from './components/MicroSlats';
 import { Button } from './components/ui/button';
@@ -91,7 +93,6 @@ function Gateway() {
   const [seriesError, setSeriesError] = useState('');
   const [stateNonce, setStateNonce] = useState(0);
   const [seriesNonce, setSeriesNonce] = useState(0);
-  const [liveReqs, setLiveReqs] = useState<ReqRecord[]>([]);
   const [liveAlerts, setLiveAlerts] = useState<AlertEvent[]>([]);
   const [liveKeyEvents, setLiveKeyEvents] = useState<KeyEvent[]>([]);
   const [liveOn, setLiveOn] = useState(false);
@@ -131,7 +132,6 @@ function Gateway() {
     getAlerts(100).then((events) => { if (!stopped) setLiveAlerts((previous) => [...previous, ...events.filter((e) => !previous.some((p) => p.ts === e.ts && p.rule_id === e.rule_id))].sort((a, b) => b.ts - a.ts).slice(0, 200)); }).catch(() => { /* Live events still arrive over SSE. */ });
     getKeyEvents(100).then((events) => { if (!stopped) setLiveKeyEvents((previous) => [...previous, ...events].sort((a, b) => b.ts - a.ts).slice(0, 100)); }).catch(() => { /* Key health remains in state. */ });
     const close = connectLive({
-      onReq: (record) => setLiveReqs((previous) => [record, ...previous].slice(0, 500)),
       onAlert: (alert) => setLiveAlerts((previous) => [alert, ...previous].slice(0, 200)),
       onKeyEvent: (event) => setLiveKeyEvents((previous) => [event, ...previous].slice(0, 100)),
       onInit: () => setLiveOn(true), onClose: () => setLiveOn(false),
@@ -140,7 +140,7 @@ function Gateway() {
   }, []);
   const viewSeries = seriesKey === range.key ? series : EMPTY_SERIES;
   const roll = useMemo(() => rollupSeries(viewSeries), [viewSeries]);
-  const props: TabProps = { state, series: viewSeries, range, liveReqs, liveAlerts, liveKeyEvents, onRange: changeRange };
+  const props: TabProps = { state, series: viewSeries, range, liveAlerts, liveKeyEvents, onRange: changeRange };
   const selectedTab = TABS.find((item) => item.key === tab)!;
   const selectedGroup = NAV_GROUPS.find((group) => group.keys.includes(tab))!;
   const tabNumber = String(TABS.findIndex((item) => item.key === tab) + 1).padStart(2, '0');
@@ -303,13 +303,13 @@ function Gateway() {
             </div>
           ))}
           {tab === 'requests' && <Requests {...props} />}
-          {(tab === 'providers' || tab === 'models') && <Admin key={tab} {...props} section={tab} />}
+          {(tab === 'providers' || tab === 'models') && <Suspense fallback={<Skeleton className="h-64 w-full" />}><Admin key={tab} {...props} section={tab} /></Suspense>}
           {tab === 'providers' && <details className="group border border-edge-700 bg-card"><summary className="flex cursor-pointer list-none items-center justify-between gap-3 px-5 py-4 text-[11px] text-edge-300"><span className="flex items-center gap-2.5"><Activity className="size-4 text-cyber-blue" aria-hidden="true" />Provider & credential diagnostics</span><ChevronRight className="size-4 transition-transform group-open:rotate-90" aria-hidden="true" /></summary><div className="space-y-5 border-t border-edge-700 p-4 md:p-5"><p className="text-[11px] leading-relaxed text-edge-400">Process-session health counters, separate from client API-key usage. Durable client totals are available in Analytics.</p><Backends {...props} /><Keys {...props} /></div></details>}
           {tab === 'api-keys' && <ClientKeys />}
-          {tab === 'analytics' && <Analytics {...props} />}
+          {tab === 'analytics' && <Suspense fallback={<Skeleton className="h-64 w-full" />}><Analytics {...props} /></Suspense>}
           {tab === 'alerts' && <Alerts {...props} />}
           {tab === 'settings' && <Settings {...props} />}
-          {tab === 'docs' && <Docs />}
+          {tab === 'docs' && <Suspense fallback={<Skeleton className="h-64 w-full" />}><Docs /></Suspense>}
           </div>
           <footer className="console-footer"><span>verloc / gateway control plane</span><span>Request metadata only. No stored prompts or completions.</span></footer>
         </div>

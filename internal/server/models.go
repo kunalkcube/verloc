@@ -80,6 +80,10 @@ type modelCatalog struct {
 	byID     map[string]*modelInfo // keyed by verloc model id
 	pricing  map[string]pricingPer1M
 	overlay  map[string]bool // ids that came from model_meta (removable)
+	// pricingCopy is PricingMap's return value, rebuilt with the catalog.
+	// The only caller marshals it read-only, so sharing it is safe and
+	// removes a whole-table copy from every dashboard poll.
+	pricingCopy map[string]pricingPer1M
 }
 
 var catalog = func() *modelCatalog {
@@ -107,6 +111,16 @@ func (c *modelCatalog) rebuildLocked() {
 		c.byID[m.ID] = m
 		c.pricing[m.ID] = m.PricingPerMillion
 	}
+	c.refreshPricingCopyLocked()
+}
+
+// refreshPricingCopyLocked snapshots c.pricing for PricingMap callers.
+// Caller holds c.mu (write).
+func (c *modelCatalog) refreshPricingCopyLocked() {
+	c.pricingCopy = make(map[string]pricingPer1M, len(c.pricing))
+	for k, v := range c.pricing {
+		c.pricingCopy[k] = v
+	}
 }
 
 func (c *modelCatalog) Lookup(id string) *modelInfo {
@@ -123,14 +137,13 @@ func (c *modelCatalog) All() []modelInfo {
 	return out
 }
 
+// PricingMap returns the catalog's shared pricing table. Callers must not
+// mutate it (the dashboard only marshals it); it is rebuilt atomically
+// with the catalog on every SyncFromConfig.
 func (c *modelCatalog) PricingMap() map[string]pricingPer1M {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
-	out := make(map[string]pricingPer1M, len(c.pricing))
-	for k, v := range c.pricing {
-		out[k] = v
-	}
-	return out
+	return c.pricingCopy
 }
 
 // SyncFromConfig rebuilds the catalog from the embedded seed plus model_meta.
@@ -167,6 +180,7 @@ func (c *modelCatalog) SyncFromConfig(cfg *Config) {
 			c.pricing[c.all[i].ID] = c.all[i].PricingPerMillion
 		}
 	}
+	c.refreshPricingCopyLocked()
 }
 
 func metaToModelInfo(id string, meta *ModelMeta, mapVal string) modelInfo {

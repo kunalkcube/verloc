@@ -197,6 +197,27 @@ func BenchmarkRequestTransformChain(b *testing.B) {
 	})
 }
 
+// BenchmarkRequestTransformChainPlain measures the chain on a typical body
+// (no reasoning history, no tool calls): the guard-first fast paths should
+// skip most decodes. The perfBody fixture above is the adversarial case —
+// it contains reasoning content, so every stage has real work to do there.
+func BenchmarkRequestTransformChainPlain(b *testing.B) {
+	var sb strings.Builder
+	sb.WriteString(`{"model":"test","stream":true,"max_tokens":1000,"messages":[{"role":"system","content":"be nice"}`)
+	for i := 0; i < 30; i++ {
+		fmt.Fprintf(&sb, `,{"role":"user","content":%q},{"role":"assistant","content":%q}`,
+			strings.Repeat("question text ", 60), strings.Repeat("answer text ", 60))
+	}
+	sb.WriteString(`]}`)
+	body := []byte(sb.String())
+	b.SetBytes(int64(len(body)))
+	for b.Loop() {
+		m := remapBody(body, "up", false, "nvidia")
+		m = stripReasoningContent(m, true)
+		_ = capMaxTokens(m, 32768)
+	}
+}
+
 // ---------- streaming chunk path ----------
 
 func BenchmarkAliasReasoningInChunk(b *testing.B) {

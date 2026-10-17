@@ -901,6 +901,27 @@ func remapBody(raw []byte, upstreamModel string, isMistral bool, backendName str
 	if len(raw) == 0 {
 		return raw
 	}
+	// Fast path for the overwhelming majority of traffic (every backend
+	// except Mistral/freeinference): only the model field changes, so
+	// decode the top level as raw messages and leave the messages tree —
+	// usually 99% of the body — completely untouched. No number is ever
+	// reformatted and no nested structure is rebuilt.
+	if !isMistral && backendName != "freeinference" {
+		var top map[string]json.RawMessage
+		if err := json.Unmarshal(raw, &top); err != nil {
+			return raw
+		}
+		modelJSON, err := json.Marshal(upstreamModel)
+		if err != nil {
+			return raw
+		}
+		top["model"] = modelJSON
+		out, err := json.Marshal(top)
+		if err != nil {
+			return raw
+		}
+		return out
+	}
 	dec := json.NewDecoder(bytes.NewReader(raw))
 	dec.UseNumber()
 	var parsed map[string]any
@@ -1185,8 +1206,15 @@ func remapBody(raw []byte, upstreamModel string, isMistral bool, backendName str
 // reject these and return 400 (e.g. "messages.N.assistant.reasoning_content:
 // property ... is unsupported"). opencode stores reasoning in prior assistant
 // turns, so the field can leak into the forwarded conversation history.
+var reasoningMarkers = [][]byte{[]byte(`"reasoning_content"`), []byte(`"reasoning"`)}
+
 func stripReasoningContent(raw []byte, strip bool) []byte {
 	if !strip || len(raw) == 0 {
+		return raw
+	}
+	// Guard: without either field name anywhere in the body there is
+	// nothing to strip — skip the full decode/re-encode entirely.
+	if !bytes.Contains(raw, reasoningMarkers[0]) && !bytes.Contains(raw, reasoningMarkers[1]) {
 		return raw
 	}
 	dec := json.NewDecoder(bytes.NewReader(raw))
@@ -1225,8 +1253,21 @@ func stripReasoningContent(raw []byte, strip bool) []byte {
 // capMaxTokens clamps Chat and Responses output limits
 // to the backend's limit. Some upstreams enforce a lower output cap than the
 // model's nominal max (e.g. Poolside caps at 32768). limit <= 0 is a no-op.
+var maxTokenMarkers = [][]byte{[]byte(`"max_tokens"`), []byte(`"max_completion_tokens"`), []byte(`"max_output_tokens"`)}
+
 func capMaxTokens(raw []byte, limit int) []byte {
 	if limit <= 0 || len(raw) == 0 {
+		return raw
+	}
+	// Guard: no output-limit field anywhere → nothing to clamp.
+	found := false
+	for _, m := range maxTokenMarkers {
+		if bytes.Contains(raw, m) {
+			found = true
+			break
+		}
+	}
+	if !found {
 		return raw
 	}
 	dec := json.NewDecoder(bytes.NewReader(raw))
@@ -1567,12 +1608,20 @@ func streamCopyWithUsage(w http.ResponseWriter, src io.Reader, onUsage func(in, 
 						onUsage(in, out, cache)
 					}
 				}
-				if opts.acc != nil {
-					opts.acc.ingest(data)
-				}
-				if opts.aliasReasoning {
-					if rewritten, ok := aliasReasoningInChunk(data); ok {
-						outLine = "data: " + string(rewritten)
+				// Reasoning backends used to decode this chunk up to
+				// three times (terminal scan, ingest, alias). Decode once
+				// into a map and share it; marshal only when the alias
+				// actually changed something.
+				if opts.acc != nil || opts.aliasReasoning {
+					if chunk, ok := decodeChunkMap(data); ok {
+						if opts.acc != nil {
+							opts.acc.ingestMap(chunk)
+						}
+						if opts.aliasReasoning && aliasReasoningMap(chunk) {
+							if rewritten, err := json.Marshal(chunk); err == nil {
+								outLine = "data: " + string(rewritten)
+							}
+						}
 					}
 				}
 			}

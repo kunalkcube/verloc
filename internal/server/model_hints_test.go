@@ -337,6 +337,11 @@ func TestHintResolverPublicCatalogAndFailureIsolation(t *testing.T) {
 			t.Fatalf("isolated source failure lost cached hints: %+v", got)
 		}
 	}
+	// The stale refresh now runs in the background (cache-first serving):
+	// the second fetch must still happen, just not on the caller's path.
+	for deadline := time.Now().Add(5 * time.Second); vercelCalls.Load() != 2 && time.Now().Before(deadline); {
+		time.Sleep(5 * time.Millisecond)
+	}
 	if vercelCalls.Load() != 2 {
 		t.Fatalf("vercel calls=%d", vercelCalls.Load())
 	}

@@ -1,11 +1,26 @@
 package server
 
 import (
+	"bytes"
 	"encoding/json"
 	"log"
 	"strings"
 	"sync"
 )
+
+// decodeChunkMap decodes one JSON object with UseNumber so integers above
+// 2^53 and high-precision floats survive a decode→marshal round trip
+// byte-faithfully (plain Unmarshal into map[string]any silently reformats
+// them through float64).
+func decodeChunkMap(payload []byte) (map[string]any, bool) {
+	dec := json.NewDecoder(bytes.NewReader(payload))
+	dec.UseNumber()
+	var chunk map[string]any
+	if err := dec.Decode(&chunk); err != nil {
+		return nil, false
+	}
+	return chunk, true
+}
 
 const (
 	maxReasoningEntries = 256
@@ -74,8 +89,13 @@ func ensureReasoningReplay(raw []byte, cache *reasoningCache) []byte {
 	if len(raw) == 0 {
 		return raw
 	}
-	var parsed map[string]any
-	if err := json.Unmarshal(raw, &parsed); err != nil {
+	// Guard: replay can only copy a `reasoning` field or fill a message
+	// carrying tool_calls. With neither present, nothing can change.
+	if !bytes.Contains(raw, []byte(`"reasoning"`)) && !bytes.Contains(raw, []byte(`"tool_calls"`)) {
+		return raw
+	}
+	parsed, ok := decodeChunkMap(raw)
+	if !ok {
 		return raw
 	}
 	msgs, ok := parsed["messages"].([]any)
@@ -175,8 +195,17 @@ func (a *sseReasoningAcc) ingest(payload []byte) {
 	if a == nil || len(payload) == 0 {
 		return
 	}
-	var chunk map[string]any
-	if err := json.Unmarshal(payload, &chunk); err != nil {
+	chunk, ok := decodeChunkMap(payload)
+	if !ok {
+		return
+	}
+	a.ingestMap(chunk)
+}
+
+// ingestMap is ingest for an already-decoded chunk, so the streaming path
+// can decode once and share the result with the reasoning alias.
+func (a *sseReasoningAcc) ingestMap(chunk map[string]any) {
+	if a == nil {
 		return
 	}
 	choices, _ := chunk["choices"].([]any)
@@ -226,13 +255,26 @@ func (a *sseReasoningAcc) store(cache *reasoningCache) {
 // aliasReasoningInChunk copies delta/message.reasoning onto reasoning_content
 // so clients that only look for the DeepSeek field still capture thinking.
 func aliasReasoningInChunk(payload []byte) ([]byte, bool) {
-	var chunk map[string]any
-	if err := json.Unmarshal(payload, &chunk); err != nil {
-		return payload, false
-	}
-	choices, ok := chunk["choices"].([]any)
+	chunk, ok := decodeChunkMap(payload)
 	if !ok {
 		return payload, false
+	}
+	if !aliasReasoningMap(chunk) {
+		return payload, false
+	}
+	out, err := json.Marshal(chunk)
+	if err != nil {
+		return payload, false
+	}
+	return out, true
+}
+
+// aliasReasoningMap applies the reasoning alias to an already-decoded
+// chunk in place, reporting whether anything changed.
+func aliasReasoningMap(chunk map[string]any) bool {
+	choices, ok := chunk["choices"].([]any)
+	if !ok {
+		return false
 	}
 	changed := false
 	for _, c := range choices {
@@ -253,14 +295,7 @@ func aliasReasoningInChunk(payload []byte) ([]byte, bool) {
 			}
 		}
 	}
-	if !changed {
-		return payload, false
-	}
-	out, err := json.Marshal(chunk)
-	if err != nil {
-		return payload, false
-	}
-	return out, true
+	return changed
 }
 
 func rememberFromResponse(body []byte, cache *reasoningCache) []byte {

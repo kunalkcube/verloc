@@ -473,7 +473,6 @@ export interface TabProps {
   state: State | null;
   series: SeriesPoint[];
   range: RangePreset;
-  liveReqs: ReqRecord[];
   liveAlerts: AlertEvent[];
   liveKeyEvents: KeyEvent[];
   onRange: (r: RangePreset) => void;

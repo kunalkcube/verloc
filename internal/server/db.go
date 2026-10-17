@@ -757,8 +757,14 @@ func (s *Store) SeriesSince(ctx context.Context, sinceMs int64, maxPoints int) (
 	if maxPoints < 1 {
 		maxPoints = 500
 	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	// Lock-free read: this used to hold s.mu across the whole scan, so one
+	// 126ms dashboard read blocked the tick writer. WAL readers never
+	// block the single writer, and this method touches only s.db.
+	// NOTE: an earlier attempt consulted the rollup before counting ticks
+	// and broke sparse-history windows (few old ticks must serve tick-level
+	// points, not minute buckets). The count is an index-only walk and was
+	// never the bottleneck — the per-tick JSON decode was, fixed by the
+	// rollup itself. Correctness first: count, then choose.
 	var n int
 	var minTs, maxTs int64
 	if err := s.db.QueryRowContext(ctx,
@@ -783,7 +789,7 @@ func (s *Store) SeriesSince(ctx context.Context, sinceMs int64, maxPoints int) (
 	return s.seriesBuckets(ctx, sinceMs, minTs, maxTs, maxPoints)
 }
 
-// seriesScan reads every tick in the window. Caller holds s.mu.
+// seriesScan reads every tick in the window. Lock-free: WAL readers never block the single writer.
 func (s *Store) seriesScan(ctx context.Context, sinceMs int64) ([]SeriesRow, error) {
 	rows, err := s.db.QueryContext(ctx, `SELECT ts, payload, d_requests, d_tok_in, d_tok_out, d_tok_cache, d_cost, d_ms, d_err, d_models, d_backends
 	                        FROM snapshots WHERE ts >= ? ORDER BY ts ASC`, sinceMs)
@@ -994,7 +1000,7 @@ func (s *Store) seriesFromMinutes(ctx context.Context, sinceMs, oldestTick int64
 	return out, true, nil
 }
 
-// seriesBuckets aggregates a long window in SQL. Caller holds s.mu.
+// seriesBuckets aggregates a long window in SQL. Lock-free read (WAL).
 func (s *Store) seriesBuckets(ctx context.Context, sinceMs, minTs, maxTs int64, maxPoints int) ([]SeriesRow, error) {
 	span := maxTs - minTs
 	if span < 1 {
@@ -1161,8 +1167,6 @@ type SeriesRow struct {
 // instead of scanning every tick (MIN/MAX/COUNT over 1M rows cost 108ms and
 // grew forever on a table that gains a row every 3s).
 func (s *Store) Range() (oldest, newest int64, count int) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
 	row := s.db.QueryRow(`SELECT oldest_ts, newest_ts, ticks FROM analytics_totals WHERE id=1`)
 	_ = row.Scan(&oldest, &newest, &count)
 	return
@@ -1192,8 +1196,6 @@ func (s *Store) RebuildTotals() error {
 // SumSnapshots computes the lifetime totals directly from raw ticks. Only used
 // to verify the maintained row (tests, repair) — never on a request path.
 func (s *Store) SumSnapshots() (cost float64, requests, tokIn, tokOut, tokCache, errN int64) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
 	row := s.db.QueryRow(
 		`SELECT COALESCE(SUM(d_cost),0), COALESCE(SUM(d_requests),0), COALESCE(SUM(d_tok_in),0),
 		        COALESCE(SUM(d_tok_out),0), COALESCE(SUM(d_tok_cache),0), COALESCE(SUM(d_err),0)
@@ -1209,8 +1211,6 @@ func (s *Store) SumSnapshots() (cost float64, requests, tokIn, tokOut, tokCache,
 // table on every /dash/api/state poll (250ms at 1M ticks) while holding s.mu,
 // which blocked the analytics writer for 241ms each time.
 func (s *Store) LifetimeTotals() (cost float64, requests, tokIn, tokOut, tokCache, errN int64) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
 	row := s.db.QueryRow(
 		`SELECT cost, requests, tok_in, tok_out, tok_cache, err FROM analytics_totals WHERE id=1`)
 	_ = row.Scan(&cost, &requests, &tokIn, &tokOut, &tokCache, &errN)
@@ -1219,8 +1219,6 @@ func (s *Store) LifetimeTotals() (cost float64, requests, tokIn, tokOut, tokCach
 
 // RecentAlerts returns the last n alert events, newest first.
 func (s *Store) RecentAlerts(n int) []AlertEvent {
-	s.mu.Lock()
-	defer s.mu.Unlock()
 	rows, err := s.db.Query(`SELECT ts, rule_id, name, severity, scope, metric, value, threshold, message
 	                        FROM alerts ORDER BY ts DESC LIMIT ?`, n)
 	if err != nil {
@@ -1345,8 +1343,6 @@ func (s *Store) CollapseAlertHistory(cooldownSec int, dryRun bool) (AlertCollaps
 
 // RecentKeyEvents returns the last n key events, newest first.
 func (s *Store) RecentKeyEvents(n int) []KeyEvent {
-	s.mu.Lock()
-	defer s.mu.Unlock()
 	rows, err := s.db.Query(`SELECT ts, backend, key, event, status, msg FROM key_events ORDER BY ts DESC,id DESC LIMIT ?`, n)
 	if err != nil {
 		return nil
