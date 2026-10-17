@@ -1,6 +1,7 @@
 package server
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"encoding/base64"
@@ -127,6 +128,12 @@ func (s *Store) migrate() error {
 		`CREATE INDEX IF NOT EXISTS idx_requests_ts_backend ON requests(ts, backend)`,
 		`CREATE INDEX IF NOT EXISTS idx_requests_ts_client ON requests(ts, client_key_id)`,
 		`CREATE INDEX IF NOT EXISTS idx_requests_ts_status_ok ON requests(ts, status, ok)`,
+		// Covering index for the unfiltered Analytics projection. The query sums
+		// these columns and never reads the JSON `record` blob, so an index-only
+		// scan avoids paging through the much larger table rows.
+		`CREATE INDEX IF NOT EXISTS idx_requests_analytics_cover ON requests(
+		   ts, model, backend, client_key_id, client_name, status, ok,
+		   tok_in, tok_out, tok_cache, cost, usage_known, cost_known, lat_ms, ttft_ms)`,
 		`CREATE TABLE IF NOT EXISTS request_hourly (
 		 hour INTEGER NOT NULL, model TEXT NOT NULL, upstream TEXT NOT NULL, backend TEXT NOT NULL,
 		 client_key_id TEXT NOT NULL, client_name TEXT NOT NULL, status INTEGER NOT NULL, ok INTEGER NOT NULL,
@@ -134,6 +141,7 @@ func (s *Store) migrate() error {
 		 tok_cache INTEGER NOT NULL, cost REAL NOT NULL, unknown_usage INTEGER NOT NULL, unknown_cost INTEGER NOT NULL,
 		 lat_sum REAL NOT NULL, ttft_sum REAL NOT NULL, ttft_n INTEGER NOT NULL,
 		 lat_hist TEXT NOT NULL, ttft_hist TEXT NOT NULL,
+		 mirrors_detail INTEGER NOT NULL DEFAULT 0,
 		 PRIMARY KEY(hour,model,upstream,backend,client_key_id,client_name,status,ok))`,
 		`CREATE TABLE IF NOT EXISTS analytics_meta (name TEXT PRIMARY KEY, value INTEGER NOT NULL)`,
 		`CREATE TABLE IF NOT EXISTS snapshots (
@@ -204,6 +212,14 @@ func (s *Store) migrate() error {
 		if _, err := s.db.Exec(q); err != nil {
 			return err
 		}
+	}
+	// Additive migration for databases created before mirrors_detail existed.
+	// SQLite has no ADD COLUMN IF NOT EXISTS, so the duplicate-column error is
+	// the expected already-migrated signal. Default 0 preserves the existing
+	// legacy semantics (hourly rows are additive with detail).
+	if _, err := s.db.Exec(`ALTER TABLE request_hourly ADD COLUMN mirrors_detail INTEGER NOT NULL DEFAULT 0`); err != nil &&
+		!strings.Contains(err.Error(), "duplicate column name") {
+		return err
 	}
 	tx, err := s.db.Begin()
 	if err != nil {
@@ -347,57 +363,27 @@ func (s *Store) InsertDelta(d *Delta) error {
 	return err
 }
 
-// minuteAcc accumulates one minute of ticks. Both the live per-tick rollup and
-// the one-time backfill fold through this type, so the two paths cannot drift.
-type minuteAcc struct {
-	req, errN, tin, tout, tcache, ms int64
-	cost                             float64
-	latW, latSum, ttftW, ttftSum     float64
-	hist, ttftHist                   [len(latBuckets) + 1]uint64
-	histN, missingN                  int64
-	models                           map[string]deltaModel
-	backends                         map[string]deltaBackend
-}
-
-func newMinuteAcc() *minuteAcc {
-	return &minuteAcc{models: map[string]deltaModel{}, backends: map[string]deltaBackend{}}
-}
-
-// addDelta folds one tick. A tick that carried traffic but no usable histogram
-// marks the minute unavailable: snapshot percentiles are averages over the tick
-// and must never be folded into a window distribution, matching the raw path.
-func (a *minuteAcc) addDelta(d *Delta) {
-	a.req += d.Requests
-	a.errN += d.Err
-	a.tin += d.TokIn
-	a.tout += d.TokOut
-	a.tcache += d.TokCache
-	a.cost += d.Cost
-	a.ms += d.MS
-	if d.Requests > 0 {
-		usable := false
-		if d.Payload != "" {
-			var st TickStats
-			if json.Unmarshal([]byte(d.Payload), &st) == nil {
-				a.latW += float64(d.Requests)
-				a.latSum += st.Avg * float64(d.Requests)
-				a.ttftW += float64(st.TTFTN)
-				a.ttftSum += st.TTFT * float64(st.TTFTN)
-				if len(st.LatHist) == len(latBuckets)+1 {
-					for i, v := range st.LatHist {
-						a.hist[i] += v
-					}
-					usable = true
-				}
-			}
-		}
-		if usable {
-			a.histN++
-		} else {
-			a.missingN++
-		}
+// mergeMinuteAcc folds the stored bucket (a) together with the incoming tick
+// (b), preserving histogram availability counters.
+func mergeMinuteAcc(a, b *minuteAcc) *minuteAcc {
+	a.req += b.req
+	a.errN += b.errN
+	a.tin += b.tin
+	a.tout += b.tout
+	a.tcache += b.tcache
+	a.cost += b.cost
+	a.ms += b.ms
+	a.latW += b.latW
+	a.latSum += b.latSum
+	a.ttftW += b.ttftW
+	a.ttftSum += b.ttftSum
+	a.histN += b.histN
+	a.missingN += b.missingN
+	for i := range a.hist {
+		a.hist[i] += b.hist[i]
+		a.ttftHist[i] += b.ttftHist[i]
 	}
-	for k, v := range d.Models {
+	for k, v := range b.models {
 		g := a.models[k]
 		g.Requests += v.Requests
 		g.TokIn += v.TokIn
@@ -406,7 +392,7 @@ func (a *minuteAcc) addDelta(d *Delta) {
 		g.Cost += v.Cost
 		a.models[k] = g
 	}
-	for k, v := range d.Backends {
+	for k, v := range b.backends {
 		g := a.backends[k]
 		g.Requests += v.Requests
 		g.TokIn += v.TokIn
@@ -416,26 +402,7 @@ func (a *minuteAcc) addDelta(d *Delta) {
 		g.Cost += v.Cost
 		a.backends[k] = g
 	}
-}
-
-func (a *minuteAcc) write(tx *sql.Tx, minute int64) error {
-	hj, _ := json.Marshal(a.hist[:])
-	thj, _ := json.Marshal(a.ttftHist[:])
-	mj, _ := json.Marshal(a.models)
-	bj, _ := json.Marshal(a.backends)
-	_, err := tx.Exec(`INSERT INTO snapshot_minute
-	   (minute,requests,err,tok_in,tok_out,tok_cache,cost,ms,lat_w,lat_sum,ttft_w,ttft_sum,hist,ttft_hist,models,backends,hist_n,missing_n)
-	   VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
-	   ON CONFLICT(minute) DO UPDATE SET
-	     requests=excluded.requests, err=excluded.err, tok_in=excluded.tok_in, tok_out=excluded.tok_out,
-	     tok_cache=excluded.tok_cache, cost=excluded.cost, ms=excluded.ms,
-	     lat_w=excluded.lat_w, lat_sum=excluded.lat_sum, ttft_w=excluded.ttft_w, ttft_sum=excluded.ttft_sum,
-	     hist=excluded.hist, ttft_hist=excluded.ttft_hist, models=excluded.models, backends=excluded.backends,
-	     hist_n=excluded.hist_n, missing_n=excluded.missing_n`,
-		minute, a.req, a.errN, a.tin, a.tout, a.tcache, a.cost, a.ms,
-		a.latW, a.latSum, a.ttftW, a.ttftSum, string(hj), string(thj), string(mj), string(bj),
-		a.histN, a.missingN)
-	return err
+	return a
 }
 
 // RebuildRollups rebuilds snapshot_minute from the raw tick table. This is the
@@ -540,51 +507,91 @@ func (s *Store) EnsureRollupsBackfilled(ctx context.Context) {
 	}()
 }
 
-// rollMinute folds one tick into its minute bucket. Guarded by the caller's
-// transaction; the histogram and dimension maps are merged in Go because the
-// dimension fold was measured to be ~2.8x slower in SQL (json_each over ~1M
-// ticks produces millions of intermediate rows) and the per-minute merge is
-// O(1) here instead of a scan later.
+// rollMinute folds one tick into its minute bucket. The merge itself lives in
+// minuteAcc.write so the per-tick path and the rebuild path share one
+// implementation and cannot drift.
 func (s *Store) rollMinute(tx *sql.Tx, d *Delta) error {
-	minute := d.TS / 60000 * 60000
-	var (
-		latW, latSum, ttftW, ttftSum float64
-		hist, ttftHist               [len(latBuckets) + 1]uint64
-		models, backends             = map[string]deltaModel{}, map[string]deltaBackend{}
-	)
-	// A tick that carried traffic but no usable histogram must mark its bucket
-	// unavailable: snapshot percentiles are not averages and cannot be folded
-	// into a window distribution (mirrors seriesBuckets' `missing` tracking).
-	var histN, missingN int64
+	acc := newMinuteAcc()
+	acc.addDelta(d)
+	return acc.write(tx, d.TS/60000*60000)
+}
+
+// minuteAcc accumulates one minute of ticks. Both the live per-tick rollup and
+// the one-time backfill fold through this type, so the two paths cannot drift.
+type minuteAcc struct {
+	blobBuf                          bytes.Buffer
+	req, errN, tin, tout, tcache, ms int64
+	cost                             float64
+	latW, latSum, ttftW, ttftSum     float64
+	hist, ttftHist                   [len(latBuckets) + 1]uint64
+	histN, missingN                  int64
+	models                           map[string]deltaModel
+	backends                         map[string]deltaBackend
+}
+
+func newMinuteAcc() *minuteAcc {
+	return &minuteAcc{models: map[string]deltaModel{}, backends: map[string]deltaBackend{}}
+}
+
+// addDelta folds one tick. A tick that carried traffic but no usable histogram
+// marks the minute unavailable: snapshot percentiles are averages over the tick
+// and must never be folded into a window distribution, matching the raw path.
+func (a *minuteAcc) addDelta(d *Delta) {
+	a.req += d.Requests
+	a.errN += d.Err
+	a.tin += d.TokIn
+	a.tout += d.TokOut
+	a.tcache += d.TokCache
+	a.cost += d.Cost
+	a.ms += d.MS
 	if d.Requests > 0 {
 		usable := false
 		if d.Payload != "" {
 			var st TickStats
 			if json.Unmarshal([]byte(d.Payload), &st) == nil {
-				latW = float64(d.Requests)
-				latSum = st.Avg * float64(d.Requests)
-				ttftW = float64(st.TTFTN)
-				ttftSum = st.TTFT * float64(st.TTFTN)
+				a.latW += float64(d.Requests)
+				a.latSum += st.Avg * float64(d.Requests)
+				a.ttftW += float64(st.TTFTN)
+				a.ttftSum += st.TTFT * float64(st.TTFTN)
 				if len(st.LatHist) == len(latBuckets)+1 {
-					copy(hist[:], st.LatHist)
+					for i, v := range st.LatHist {
+						a.hist[i] += v
+					}
 					usable = true
 				}
 			}
 		}
 		if usable {
-			histN = 1
+			a.histN++
 		} else {
-			missingN = 1
+			a.missingN++
 		}
 	}
 	for k, v := range d.Models {
-		models[k] = v
+		g := a.models[k]
+		g.Requests += v.Requests
+		g.TokIn += v.TokIn
+		g.TokOut += v.TokOut
+		g.TokCache += v.TokCache
+		g.Cost += v.Cost
+		a.models[k] = g
 	}
 	for k, v := range d.Backends {
-		backends[k] = v
+		g := a.backends[k]
+		g.Requests += v.Requests
+		g.TokIn += v.TokIn
+		g.TokOut += v.TokOut
+		g.TokCache += v.TokCache
+		g.Err += v.Err
+		g.Cost += v.Cost
+		a.backends[k] = g
 	}
+}
 
-	// Read the existing bucket, merge, write back in the same transaction.
+func (a *minuteAcc) write(tx *sql.Tx, minute int64) error {
+	// Read-merge-write in the caller's transaction. ALL scalar columns are
+	// loaded, not just the dimensions: omitting them silently dropped every
+	// previous tick in the minute (caught by the rebuild-equivalence test).
 	var (
 		pReq, pErr, pIn, pOut, pCache, pMS int64
 		pCost                              float64
@@ -600,58 +607,38 @@ func (s *Store) rollMinute(tx *sql.Tx, d *Delta) error {
 		return err
 	}
 	if err == nil {
-		var h, th [len(latBuckets) + 1]uint64
-		var mm map[string]deltaModel
-		var bb map[string]deltaBackend
-		_ = json.Unmarshal([]byte(pHist), &h)
-		_ = json.Unmarshal([]byte(pTTFTHist), &th)
-		_ = json.Unmarshal([]byte(pModels), &mm)
-		_ = json.Unmarshal([]byte(pBack), &bb)
-		for i := range hist {
-			hist[i] += h[i]
-			ttftHist[i] += th[i]
+		prev := newMinuteAcc()
+		prev.req, prev.errN, prev.tin, prev.tout, prev.tcache = pReq, pErr, pIn, pOut, pCache
+		prev.cost, prev.ms = pCost, pMS
+		prev.latW, prev.latSum, prev.ttftW, prev.ttftSum = pLatW, pLatSum, pTTFTW, pTTFTSum
+		prev.histN, prev.missingN = pHistN, pMissingN
+		var h, th []uint64
+		_ = decodeMinutes([]byte(pModels), &prev.models, &prev.backends, &h, &th)
+		if len(h) != len(latBuckets)+1 {
+			var fh [len(latBuckets) + 1]uint64
+			if json.Unmarshal([]byte(pHist), &fh) == nil {
+				h = fh[:]
+			}
 		}
-		for k, v := range mm {
-			g := models[k]
-			g.Requests += v.Requests
-			g.TokIn += v.TokIn
-			g.TokOut += v.TokOut
-			g.TokCache += v.TokCache
-			g.Cost += v.Cost
-			models[k] = g
+		if len(th) != len(latBuckets)+1 {
+			var fth [len(latBuckets) + 1]uint64
+			if json.Unmarshal([]byte(pTTFTHist), &fth) == nil {
+				th = fth[:]
+			}
 		}
-		for k, v := range bb {
-			g := backends[k]
-			g.Requests += v.Requests
-			g.TokIn += v.TokIn
-			g.TokOut += v.TokOut
-			g.TokCache += v.TokCache
-			g.Err += v.Err
-			g.Cost += v.Cost
-			backends[k] = g
+		for i := range prev.hist {
+			if i < len(h) {
+				prev.hist[i] = h[i]
+			}
+			if i < len(th) {
+				prev.ttftHist[i] = th[i]
+			}
 		}
-		latW += pLatW
-		latSum += pLatSum
-		ttftW += pTTFTW
-		ttftSum += pTTFTSum
-		pReq += d.Requests
-		pErr += d.Err
-		pIn += d.TokIn
-		pOut += d.TokOut
-		pCache += d.TokCache
-		pCost += d.Cost
-		pMS += d.MS
-		histN += pHistN
-		missingN += pMissingN
-	} else {
-		pReq, pErr, pIn, pOut, pCache, pMS = d.Requests, d.Err, d.TokIn, d.TokOut, d.TokCache, d.MS
-		pCost = d.Cost
+		a = mergeMinuteAcc(prev, a)
 	}
-
-	hj, _ := json.Marshal(hist[:])
-	thj, _ := json.Marshal(ttftHist[:])
-	mj, _ := json.Marshal(models)
-	bj, _ := json.Marshal(backends)
+	blob := encodeMinutes(&a.blobBuf, a.models, a.backends, a.hist[:], a.ttftHist[:])
+	hj, _ := json.Marshal(a.hist[:])
+	thj, _ := json.Marshal(a.ttftHist[:])
 	_, err = tx.Exec(`INSERT INTO snapshot_minute
 	   (minute,requests,err,tok_in,tok_out,tok_cache,cost,ms,lat_w,lat_sum,ttft_w,ttft_sum,hist,ttft_hist,models,backends,hist_n,missing_n)
 	   VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
@@ -661,8 +648,9 @@ func (s *Store) rollMinute(tx *sql.Tx, d *Delta) error {
 	     lat_w=excluded.lat_w, lat_sum=excluded.lat_sum, ttft_w=excluded.ttft_w, ttft_sum=excluded.ttft_sum,
 	     hist=excluded.hist, ttft_hist=excluded.ttft_hist, models=excluded.models, backends=excluded.backends,
 	     hist_n=excluded.hist_n, missing_n=excluded.missing_n`,
-		minute, pReq, pErr, pIn, pOut, pCache, pCost, pMS, latW, latSum, ttftW, ttftSum,
-		string(hj), string(thj), string(mj), string(bj), histN, missingN)
+		minute, a.req, a.errN, a.tin, a.tout, a.tcache, a.cost, a.ms,
+		a.latW, a.latSum, a.ttftW, a.ttftSum, string(hj), string(thj), blob, blob,
+		a.histN, a.missingN)
 	return err
 }
 
@@ -865,6 +853,8 @@ func (s *Store) seriesFromMinutes(ctx context.Context, sinceMs, oldestTick int64
 			&latW, &latSum, &ttftW, &ttftSum, &hj, &thj, &mj, &bj, &missingN); err != nil {
 			return nil, false, err
 		}
+		_ = hj
+		_ = thj
 		idx := (minute - firstMinute) / bucketMs
 		a := buckets[idx]
 		if a == nil {
@@ -886,21 +876,23 @@ func (s *Store) seriesFromMinutes(ctx context.Context, sinceMs, oldestTick int64
 		a.ttftSum += ttftSum
 		a.missingN += missingN
 
-		var h, th [len(latBuckets) + 1]uint64
-		if json.Unmarshal([]byte(hj), &h) == nil {
+		// One codec call replaces three json.Unmarshal calls per minute row,
+		// which was the dominant remaining cost of this endpoint. Legacy JSON
+		// rows are decoded transparently by the codec.
+		var h, th []uint64
+		var mm map[string]deltaModel
+		var bb map[string]deltaBackend
+		_ = decodeMinutes([]byte(mj), &mm, &bb, &h, &th)
+		if len(h) == len(latBuckets)+1 {
 			for i, v := range h {
 				a.hist[i] += v
 			}
 		}
-		if json.Unmarshal([]byte(thj), &th) == nil {
+		if len(th) == len(latBuckets)+1 {
 			for i, v := range th {
 				a.ttftHist[i] += v
 			}
 		}
-		var mm map[string]deltaModel
-		var bb map[string]deltaBackend
-		_ = json.Unmarshal([]byte(mj), &mm)
-		_ = json.Unmarshal([]byte(bj), &bb)
 		for k, v := range mm {
 			g := a.models[k]
 			g.Requests += v.Requests
@@ -1861,8 +1853,21 @@ func (s *Store) Analytics(ctx context.Context, f RequestFilter) (AnalyticsResult
 	if err != nil {
 		return out, err
 	}
-	where, args = f.where(true)
-	rows, err = tx.QueryContext(ctx, `SELECT hour,model,backend,client_key_id,client_name,status,requests,errors,tok_in,tok_out,tok_cache,cost,unknown_usage,unknown_cost,lat_sum,ttft_sum,ttft_n,lat_hist,ttft_hist FROM request_hourly WHERE `+where, args...)
+	// request_hourly is a COVERAGE TIER whose rows are aggregates of detail that
+	// was PRUNED, so they are additive with any surviving detail for the same
+	// hour (the documented legacy behaviour, and covered by
+	// TestLegacyHourlyHistoryAndWindowBoundaries).
+	//
+	// The hazard this excludes: if a future writer mirrors detail into this
+	// table WITHOUT deleting it, those rows would be counted twice. Such a row
+	// must declare itself with mirrors_detail=1. Legacy rows default to 0 and
+	// keep contributing exactly as before.
+	hourlyWhere, hourlyArgs := f.where(true)
+	hourlyWhere = strings.Replace(hourlyWhere, "hour+3600000<=?", "hour+3600000<=? AND mirrors_detail=0", 1)
+	if hourlyWhere == "1=1" {
+		hourlyWhere = "mirrors_detail=0"
+	}
+	rows, err = tx.QueryContext(ctx, `SELECT hour,model,backend,client_key_id,client_name,status,requests,errors,tok_in,tok_out,tok_cache,cost,unknown_usage,unknown_cost,lat_sum,ttft_sum,ttft_n,lat_hist,ttft_hist FROM request_hourly WHERE `+hourlyWhere, hourlyArgs...)
 	if err != nil {
 		return out, err
 	}

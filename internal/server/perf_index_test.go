@@ -90,3 +90,35 @@ func TestFilteredAnalyticsPlanUsesIndex(t *testing.T) {
 		}
 	}
 }
+
+// TestUnfilteredAnalyticsUsesCoveringIndex documents that the unfiltered
+// Analytics projection scans the covering index rather than the table. If the
+// planner regresses to a full table scan the endpoint silently returns to
+// paging through the JSON `record` blob, which is what made it 970ms.
+func TestUnfilteredAnalyticsUsesCoveringIndex(t *testing.T) {
+	store := perfStore(t)
+	seedRequests(t, store, 20_000)
+	_, _ = store.db.Exec(`ANALYZE`)
+
+	const q = `SELECT ts, model, backend, client_key_id, client_name, status, ok,
+	                  tok_in, tok_out, tok_cache, cost, usage_known, cost_known, lat_ms, ttft_ms
+	           FROM requests WHERE ts>=1000`
+	rows, err := store.db.Query("EXPLAIN QUERY PLAN " + q)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	var plans []string
+	for rows.Next() {
+		var a, b, c int
+		var detail string
+		if err := rows.Scan(&a, &b, &c, &detail); err == nil {
+			plans = append(plans, detail)
+		}
+	}
+	joined := strings.Join(plans, " | ")
+	t.Logf("plan: %s", joined)
+	if strings.Contains(joined, "SCAN requests") && !strings.Contains(joined, "USING") {
+		t.Fatalf("unfiltered analytics fell back to a full table scan (record blob paging): %s", joined)
+	}
+}

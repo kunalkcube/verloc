@@ -115,7 +115,7 @@ func TestLegacyHourlyHistoryAndWindowBoundaries(t *testing.T) {
 	ttftJSON, _ := json.Marshal(ttftHist)
 	// Model an hourly row written by an older release, without recreating
 	// the removed detail-to-aggregate compaction path.
-	if _, err := s.db.Exec(`INSERT INTO request_hourly VALUES (7200000,'model-a','upstream-a','provider-a','client-a','Agent',200,1,2,0,20,10,0,0.5,0,0,10100,1050,2,?,?)`, string(latJSON), string(ttftJSON)); err != nil {
+	if _, err := s.db.Exec(`INSERT INTO request_hourly (hour,model,upstream,backend,client_key_id,client_name,status,ok,requests,errors,tok_in,tok_out,tok_cache,cost,unknown_usage,unknown_cost,lat_sum,ttft_sum,ttft_n,lat_hist,ttft_hist) VALUES (7200000,'model-a','upstream-a','provider-a','client-a','Agent',200,1,2,0,20,10,0,0.5,0,0,10100,1050,2,?,?)`, string(latJSON), string(ttftJSON)); err != nil {
 		t.Fatal(err)
 	}
 	fresh := analyticsRecord(4*hour+300, "new")
@@ -494,7 +494,7 @@ func TestLegacyHourlyUnknownUsageSurvivesRestart(t *testing.T) {
 	}
 	// Persist a historical aggregate directly: new requests no longer create
 	// these rows, but old installations must retain their accounting.
-	if _, err = s.db.Exec(`INSERT INTO request_hourly VALUES (7200000,'model-a','upstream-a','provider-a','client-a','Agent',200,1,2,0,10,5,3,0.25,1,1,200,100,2,'[]','[]')`); err != nil {
+	if _, err = s.db.Exec(`INSERT INTO request_hourly (hour,model,upstream,backend,client_key_id,client_name,status,ok,requests,errors,tok_in,tok_out,tok_cache,cost,unknown_usage,unknown_cost,lat_sum,ttft_sum,ttft_n,lat_hist,ttft_hist) VALUES (7200000,'model-a','upstream-a','provider-a','client-a','Agent',200,1,2,0,10,5,3,0.25,1,1,200,100,2,'[]','[]')`); err != nil {
 		t.Fatal(err)
 	}
 	if err = s.Close(); err != nil {
