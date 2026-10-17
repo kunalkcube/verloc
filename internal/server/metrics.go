@@ -282,7 +282,9 @@ func (mt *Metrics) backend(name string) *metricSet {
 }
 
 func (mt *Metrics) Record(model, backend string, stream bool, status int, tin, tout, tcache, latNs, ttftNs uint64) {
-	mt.Record2(model, backend, stream, status, tin, tout, tcache, latNs, ttftNs, true)
+	// Derive ok from the status: hardcoding true recorded every 5xx as a
+	// success for any caller of this convenience wrapper.
+	mt.Record2(model, backend, stream, status, tin, tout, tcache, latNs, ttftNs, status >= 200 && status < 300)
 }
 
 // Record2 records one completed request with explicit ok/err classification.

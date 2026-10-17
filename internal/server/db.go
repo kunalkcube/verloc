@@ -939,6 +939,15 @@ func (s *Store) seriesFromMinutes(ctx context.Context, sinceMs, oldestTick int64
 		var mm map[string]deltaModel
 		var bb map[string]deltaBackend
 		_ = decodeMinutes([]byte(mj), &mm, &bb, &h, &th)
+		// Legacy JSON-era rows keep their histograms in the separate hist
+		// columns, not in the dimension blob: fall back to them so those
+		// minutes do not silently report zeroed percentiles.
+		if len(h) == 0 && hj != "" {
+			_ = json.Unmarshal([]byte(hj), &h)
+		}
+		if len(th) == 0 && thj != "" {
+			_ = json.Unmarshal([]byte(thj), &th)
+		}
 		if len(h) == len(latBuckets)+1 {
 			for i, v := range h {
 				a.hist[i] += v
@@ -2015,9 +2024,14 @@ func (s *Store) Analytics(ctx context.Context, f RequestFilter) (AnalyticsResult
 	// must declare itself with mirrors_detail=1. Legacy rows default to 0 and
 	// keep contributing exactly as before.
 	hourlyWhere, hourlyArgs := f.where(true)
-	hourlyWhere = strings.Replace(hourlyWhere, "hour+3600000<=?", "hour+3600000<=? AND mirrors_detail=0", 1)
+	// The mirrors_detail exclusion must apply to EVERY query shape — the
+	// old string replacement only fired when an Until bound happened to
+	// produce that exact substring, so since-only or model-only queries
+	// would double-count a future mirroring writer's rows.
 	if hourlyWhere == "1=1" {
 		hourlyWhere = "mirrors_detail=0"
+	} else {
+		hourlyWhere += " AND mirrors_detail=0"
 	}
 	rows, err = tx.QueryContext(ctx, `SELECT hour,model,backend,client_key_id,client_name,status,requests,errors,tok_in,tok_out,tok_cache,cost,unknown_usage,unknown_cost,lat_sum,ttft_sum,ttft_n,lat_hist,ttft_hist FROM request_hourly WHERE `+hourlyWhere, hourlyArgs...)
 	if err != nil {

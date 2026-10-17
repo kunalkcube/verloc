@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"net/url"
 	"slices"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -558,9 +559,19 @@ func decodeModelsDev(body []byte) ([]catalogEntry, error) {
 		return nil, err
 	}
 	var out []catalogEntry
+	// The same model legitimately appears under several providers (and the
+	// canonical map) with possibly disagreeing fields: those duplicates are
+	// the INPUT to consensusHints, which drops fields the sources disagree
+	// on. Deduping here would silently crown the first source instead.
+	// Iteration is sorted only so decoding is deterministic.
 	appendModels := func(models map[string]json.RawMessage) {
-		for id, raw := range models {
-			if e, ok := decodeCatalogEntry(raw, id, "models.dev"); ok {
+		ids := make([]string, 0, len(models))
+		for id := range models {
+			ids = append(ids, id)
+		}
+		sort.Strings(ids)
+		for _, id := range ids {
+			if e, ok := decodeCatalogEntry(models[id], id, "models.dev"); ok {
 				out = append(out, e)
 			}
 		}

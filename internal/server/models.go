@@ -107,9 +107,15 @@ func (c *modelCatalog) rebuildLocked() {
 	c.pricing = map[string]pricingPer1M{}
 	for i := range c.all {
 		m := &c.all[i]
-		m.PricingKnown = true
+		// Honest pricing: a seed row is "known" only when it carries
+		// pricing data (an explicit "0" is a real free price; blank means
+		// unknown). Force-marking every row billed unpriced models at $0,
+		// violating the project's unknown ≠ zero rule.
+		m.PricingKnown = m.PricingKnown || m.Pricing.Prompt != "" || m.Pricing.Completion != ""
 		c.byID[m.ID] = m
-		c.pricing[m.ID] = m.PricingPerMillion
+		if m.PricingKnown {
+			c.pricing[m.ID] = m.PricingPerMillion
+		}
 	}
 	c.refreshPricingCopyLocked()
 }

@@ -14,6 +14,7 @@ type KeyState struct {
 	masked        string       // precomputed maskKey(Key); immutable, safe to read concurrently
 	cooldownUntil atomic.Int64 // unix nano; 0 = healthy
 	failCount     atomic.Int32
+	successStreak atomic.Int32 // consecutive successes since the last failure
 	requests      atomic.Uint64
 	ok            atomic.Uint64
 	err           atomic.Uint64
@@ -98,6 +99,7 @@ func (p *KeyPool) Next() *KeyState { return p.NextUntried(nil) }
 // (e.g. parsed from a Retry-After header); otherwise cooldown grows with
 // consecutive failures, capped at 5 minutes.
 func (p *KeyPool) MarkFailure(s *KeyState, override time.Duration) {
+	s.successStreak.Store(0)
 	fc := s.failCount.Add(1)
 	var d time.Duration
 	if override > 0 {
@@ -115,12 +117,24 @@ func (p *KeyPool) MarkFailure(s *KeyState, override time.Duration) {
 	p.emit(s.masked, "cooldown", 0, d.String())
 }
 
+// recoverSuccesses is how many consecutive successes a previously-failing
+// key needs before its failure history is forgiven. One success used to
+// zero failCount immediately, so a flapping key oscillated forever and
+// never earned a longer cooldown — it kept re-hammering a struggling
+// upstream at the minimum backoff.
+const recoverSuccesses = 2
+
 func (p *KeyPool) MarkSuccess(s *KeyState) {
 	if s.failCount.Load() > 0 {
+		if s.successStreak.Add(1) < recoverSuccesses {
+			return // not yet trusted again; keep the failure history
+		}
+		s.successStreak.Store(0)
 		s.failCount.Store(0)
 		s.cooldownUntil.Store(0)
 		p.emit(s.masked, "recover", 0, "")
 	} else {
+		s.successStreak.Store(0)
 		s.failCount.Store(0)
 		s.cooldownUntil.Store(0)
 	}

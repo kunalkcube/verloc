@@ -395,6 +395,10 @@ func (c *Config) resolveBackends() (map[string]*backend, error) {
 			authFormat: c.AuthHeaderFormat,
 			pool:       NewKeyPool(entries, time.Duration(c.CooldownSeconds)*time.Second),
 			client:     newClient(c.RequestTimeout),
+			// Same default as the multi-provider path (strip=true unless a
+			// provider explicitly opts out); the legacy branch used to
+			// leave the zero value, so behaviour depended on config shape.
+			stripReasoning: true,
 		}
 		if b.authHeader == "" {
 			b.authHeader = "Authorization"
