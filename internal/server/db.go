@@ -81,7 +81,19 @@ func OpenStore(path string) (*Store, error) {
 			return nil, closeErr
 		}
 	}
-	db, err := sql.Open("sqlite", path)
+	// busy_timeout must be in the DSN so EVERY pooled connection gets it.
+	// Setting it with a one-off Exec (as migrate does) configures only the
+	// connection that happened to run it; the others fall back to SQLite's
+	// default of 0 and return SQLITE_BUSY immediately under contention.
+	dsn := path
+	if path != ":memory:" {
+		sep := "?"
+		if strings.Contains(path, "?") {
+			sep = "&"
+		}
+		dsn = path + sep + "_pragma=busy_timeout(5000)"
+	}
+	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		return nil, err
 	}
@@ -239,7 +251,9 @@ func (s *Store) migrate() error {
 			return err
 		}
 	}
-	if _, err = tx.Exec(`UPDATE key_events SET key='',msg='' WHERE key!='' OR msg!=''`); err != nil {
+	// Legacy scrub: current code never populates these columns, so only pay
+	// for the full-table UPDATE when a legacy row actually needs it.
+	if _, err = tx.Exec(`UPDATE key_events SET key='',msg='' WHERE (key!='' OR msg!='') AND EXISTS (SELECT 1 FROM key_events WHERE key!='' OR msg!='' LIMIT 1)`); err != nil {
 		return err
 	}
 	if err := tx.Commit(); err != nil {
@@ -300,6 +314,8 @@ type deltaModel struct {
 	TokIn    int64   `json:"tok_in"`
 	TokOut   int64   `json:"tok_out"`
 	TokCache int64   `json:"tok_cache"`
+	Err      int64   `json:"err"`
+	Failover int64   `json:"failover"`
 	Cost     float64 `json:"cost"`
 }
 
@@ -309,10 +325,17 @@ type deltaBackend struct {
 	TokOut   int64   `json:"tok_out"`
 	TokCache int64   `json:"tok_cache"`
 	Err      int64   `json:"err"`
+	Failover int64   `json:"failover"`
 	Cost     float64 `json:"cost"`
 }
 
 func (s *Store) InsertDelta(d *Delta) error {
+	// A non-finite cost would poison every SUM it touches (NaN compares
+	// false against everything and never washes out). QueueRequest already
+	// clamps request costs; the tick path needs the same guard.
+	if math.IsNaN(d.Cost) || math.IsInf(d.Cost, 0) {
+		d.Cost = 0
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	mj, err := json.Marshal(d.Models)
@@ -389,6 +412,8 @@ func mergeMinuteAcc(a, b *minuteAcc) *minuteAcc {
 		g.TokIn += v.TokIn
 		g.TokOut += v.TokOut
 		g.TokCache += v.TokCache
+		g.Err += v.Err
+		g.Failover += v.Failover
 		g.Cost += v.Cost
 		a.models[k] = g
 	}
@@ -399,6 +424,7 @@ func mergeMinuteAcc(a, b *minuteAcc) *minuteAcc {
 		g.TokOut += v.TokOut
 		g.TokCache += v.TokCache
 		g.Err += v.Err
+		g.Failover += v.Failover
 		g.Cost += v.Cost
 		a.backends[k] = g
 	}
@@ -501,17 +527,26 @@ func (s *Store) EnsureRollupsBackfilled(ctx context.Context) {
 	// totals increment per snapshot row, so any mismatch marks the row as
 	// unseeded. RebuildTotals takes s.mu like every tick insert, so it cannot
 	// interleave with the live writer.
-	if ticks > 0 && totalTicks != ticks {
-		if err := s.RebuildTotals(); err != nil {
-			log.Printf("[analytics] totals backfill failed: %v", err)
-		} else {
-			log.Printf("[analytics] totals backfill complete: %d ticks", ticks)
-		}
-	}
-	if minutes > 0 || ticks == 0 {
+	needsTotals := ticks > 0 && totalTicks != ticks
+	if !needsTotals && (minutes > 0 || ticks == 0) {
 		return
 	}
+	// Both rebuilds are whole-history scans (RebuildTotals measured ~331ms
+	// at 1M ticks, holding s.mu). They used to run synchronously on the
+	// startup path; LifetimeTotals already self-heals lazily on read, so
+	// deferring the repair to this goroutine cannot serve wrong data — it
+	// only removes the boot-time stall.
 	go func() {
+		if needsTotals {
+			if err := s.RebuildTotals(); err != nil {
+				log.Printf("[analytics] totals backfill failed: %v", err)
+			} else {
+				log.Printf("[analytics] totals backfill complete: %d ticks", ticks)
+			}
+		}
+		if minutes > 0 || ticks == 0 {
+			return
+		}
 		start := time.Now()
 		n, err := s.RebuildRollups(ctx)
 		if err != nil {

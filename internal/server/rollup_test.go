@@ -154,7 +154,17 @@ func TestEnsureTotalsBackfillSeedsUpgradedDatabase(t *testing.T) {
 
 	s.EnsureRollupsBackfilled(context.Background())
 
-	gotCost, gotReq, _, _, _, gotErr := s.LifetimeTotals()
+	// The repair runs in the background so startup is never blocked by a
+	// whole-history scan; poll until it lands.
+	var gotCost float64
+	var gotReq, gotErr int64
+	for deadline := time.Now().Add(5 * time.Second); time.Now().Before(deadline); {
+		gotCost, gotReq, _, _, _, gotErr = s.LifetimeTotals()
+		if gotReq != 0 {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
 	wantCost, wantReq, _, _, _, wantErr := s.SumSnapshots()
 	if diffFloat(gotCost, wantCost) || gotReq != wantReq || gotErr != wantErr {
 		t.Fatalf("totals after boot repair: cost=%v req=%d err=%d, want cost=%v req=%d err=%d",

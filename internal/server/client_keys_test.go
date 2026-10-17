@@ -14,6 +14,9 @@ import (
 
 func createSecurityTestKey(t *testing.T, e *securityTestEnv, cookie *http.Cookie, csrf string, policy clientKeyRequest) (string, ClientKeyView) {
 	t.Helper()
+	if len(policy.AllowedModels) == 0 {
+		policy.AllowedModels = []string{"*"} // unrestricted test key, stated explicitly
+	}
 	w := e.request("POST", "/dash/api/admin/client-keys", policy, cookie, csrf)
 	if w.Code != 201 {
 		t.Fatalf("create client key: %d %s", w.Code, w.Body.String())
@@ -296,8 +299,11 @@ func TestClientIdentityAllowlistAndSaturatingAccounting(t *testing.T) {
 	if (*ClientIdentity)(nil).AllowsModel("m") {
 		t.Fatal("nil identity allows a model")
 	}
-	if !(&ClientIdentity{}).AllowsModel("m") {
-		t.Fatal("empty allowlist must allow configured models")
+	if (&ClientIdentity{}).AllowsModel("m") {
+		t.Fatal("empty allowlist must allow nothing — access is explicit")
+	}
+	if !(&ClientIdentity{AllowedModels: []string{"*"}}).AllowsModel("m") {
+		t.Fatal("wildcard allowlist must allow configured models")
 	}
 	if (&ClientIdentity{AllowedModels: []string{"m"}}).AllowsModel("M") {
 		t.Fatal("allowlist model IDs must match exactly")
@@ -315,7 +321,7 @@ func TestClientTPMPolicyEditRequiresFreshAuthenticatedBounds(t *testing.T) {
 	if ClientIdentityFromRequest(unlimitedRequest).TPM != 0 {
 		t.Fatal("unlimited TPM snapshot is incorrect")
 	}
-	policy := clientKeyRequest{Name: "policy race", TPM: 100}
+	policy := clientKeyRequest{Name: "policy race", TPM: 100, AllowedModels: []string{"*"}}
 	path := "/dash/api/admin/client-keys/" + view.ID
 	if w := e.request("PUT", path, policy, cookie, csrf); w.Code != 200 {
 		t.Fatalf("enable TPM: %d", w.Code)

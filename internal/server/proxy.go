@@ -38,6 +38,24 @@ var hopByHop = map[string]bool{
 // limit costs nothing for ordinary traffic.
 const maxSSELineBytes = 8 << 20
 
+// maxEventBufBytes bounds the buffered bytes of one SSE event. Events flush
+// at blank-line boundaries, but an upstream that sends data lines forever
+// without one would otherwise grow the buffer without limit while the
+// client sees nothing. Past this cap the partial event is flushed as-is —
+// byte-identical passthrough, since the client parser also waits for the
+// blank line — so memory stays bounded without ever aborting a healthy
+// stream for sending a legitimately large event.
+const maxEventBufBytes = 2 << 20
+
+// maxPost200Duration is the absolute ceiling on a healthy upstream response
+// once a 200 is in hand. The retry budget (correctly) stops at that point
+// and the idle reader only bounds gaps between reads, so without this a
+// slow-drip upstream (one byte per idle window) could pin an in-flight
+// slot forever. Ten minutes is far beyond any legitimate generation —
+// production long-tail requests finish in tens of seconds — while still
+// bounding the drip.
+const maxPost200Duration = 10 * time.Minute
+
 // Matches balance / rate-limit style errors in a 400 body so we can fail over.
 var balanceRe = regexp.MustCompile(`(?i)(insufficient|quota|balance|credit|rate.?limit|try again later|payment)`)
 
@@ -764,6 +782,7 @@ func (s *Server) forward(w http.ResponseWriter, r *http.Request, endpoint string
 				if !b.stripReasoning {
 					acc = &sseReasoningAcc{}
 				}
+				absTimer := time.AfterFunc(maxPost200Duration, cancel)
 				err = streamCopyWithUsage(streamWriter, idle, func(i, o, c uint64) {
 					rec.TokIn, rec.TokOut, rec.TokCache, rec.UsageKnown = i, o, c, true
 				}, func() { rec.TTFTMs = float64(time.Since(start).Nanoseconds()) / 1e6 }, streamOptions{
@@ -771,6 +790,7 @@ func (s *Server) forward(w http.ResponseWriter, r *http.Request, endpoint string
 					acc:            acc,
 				})
 				budgetTimer.Stop()
+				absTimer.Stop()
 				idle.Close()
 				cancel()
 				_ = http.NewResponseController(w).SetWriteDeadline(time.Time{})
@@ -824,8 +844,10 @@ func (s *Server) forward(w http.ResponseWriter, r *http.Request, endpoint string
 				// connection cannot pin a request forever.
 				idleTimeout := time.Duration(limits.StreamIdleTimeoutSeconds) * time.Second
 				idle := newIdleReader(resp.Body, idleTimeout, cancel)
+				absTimer := time.AfterFunc(maxPost200Duration, cancel)
 				var body []byte
 				body, err = io.ReadAll(io.LimitReader(idle, (64<<20)+1))
+				absTimer.Stop()
 				_ = idle.Close()
 				if err == nil && (len(body) > 64<<20 || !json.Valid(body)) {
 					err = errors.New("incomplete upstream response")
@@ -1557,6 +1579,11 @@ func streamCopyWithUsage(w http.ResponseWriter, src io.Reader, onUsage func(in, 
 		}
 		eventBuf = append(eventBuf, outLine...)
 		eventBuf = append(eventBuf, '\n')
+		if len(eventBuf) > maxEventBufBytes {
+			if err := flushEvent(); err != nil {
+				return err
+			}
+		}
 		if onFirst != nil && strings.HasPrefix(line, "data:") {
 			onFirst()
 			onFirst = nil

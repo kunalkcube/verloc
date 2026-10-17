@@ -226,6 +226,30 @@ type AlertEngine struct {
 	recentN    int
 	recentHead int  // next write slot
 	recentFull bool // true once the ring has wrapped
+
+	// Telemetry errors are a lifetime cumulative counter, so comparing the
+	// raw value against a threshold fires forever once it trips. The engine
+	// keeps the last-seen total and alerts on the increase since the
+	// previous eval instead. The counters are process-lifetime, so the
+	// baseline starts at zero: failures already recorded when the engine
+	// starts are reported once, then only new failures fire.
+	telemMu   sync.Mutex
+	telemBase uint64
+}
+
+// telemetryErrorDelta returns how many telemetry errors accumulated since
+// the previous call.
+func (e *AlertEngine) telemetryErrorDelta() float64 {
+	if e.store == nil {
+		return 0
+	}
+	v := e.store.Telemetry()
+	cur := v.WriteErrors + v.DroppedRequests + v.DroppedKeyEvents
+	e.telemMu.Lock()
+	defer e.telemMu.Unlock()
+	d := cur - e.telemBase
+	e.telemBase = cur
+	return float64(d)
 }
 
 func NewAlertEngine(store *Store, hub *Hub, rules []AlertRule) *AlertEngine {
@@ -304,10 +328,7 @@ func (e *AlertEngine) evalRule(r *AlertRule, now time.Time, keyCooldown func() i
 		t := e.agg.Sum(r.WindowSec)
 		switch r.Metric {
 		case "telemetry_errors":
-			if e.store != nil {
-				v := e.store.Telemetry()
-				value = float64(v.WriteErrors + v.DroppedRequests + v.DroppedKeyEvents)
-			}
+			value = e.telemetryErrorDelta()
 		case "telemetry_queued":
 			if e.store != nil {
 				value = float64(e.store.Telemetry().Queued)
@@ -422,6 +443,7 @@ func alertMessage(r *AlertRule, value float64) string {
 		"rps":              " req/s",
 		"tokens_per_hour":  " tok/h",
 		"latency_p95":      " ms",
+		"ttft_p95":         " ms",
 		"ttft_avg":         " ms",
 		"keys_in_cooldown": " keys",
 	}[r.Metric]

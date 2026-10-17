@@ -66,10 +66,15 @@ func (s *Server) applyLive(newCfg *Config) error {
 	// the UI was told had failed. Recover, log loudly, and continue to publish:
 	// an inconsistent-but-published runtime is strictly better than a silent
 	// divergence, and the failure is surfaced rather than swallowed.
+	var publishErr error
 	func() {
 		defer func() {
 			if p := recover(); p != nil {
 				log.Printf("[admin] PANIC while publishing committed config (db and runtime may diverge until the next apply): %v", p)
+				// The commit stands, but telling the client "applied" would
+				// be false: the runtime may still serve the old config until
+				// restart. Surface it so the operator reloads deliberately.
+				publishErr = fmt.Errorf("config committed but publication failed (%v); restart verloc to apply it", p)
 			}
 		}()
 		s.wirePoolHooks(backends)
@@ -80,6 +85,9 @@ func (s *Server) applyLive(newCfg *Config) error {
 			log.Printf("[admin] telemetry settings not applied after commit: %v", err)
 		}
 	}()
+	if publishErr != nil {
+		return publishErr
+	}
 	for name, ob := range old.backends {
 		if nb := backends[name]; nb == nil || nb.client != ob.client {
 			ob.client.CloseIdleConnections()

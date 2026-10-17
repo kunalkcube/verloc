@@ -434,9 +434,17 @@ func getJSON(ctx context.Context, url string, limit int64, timeout time.Duration
 		return nil, err
 	}
 	defer resp.Body.Close()
-	body, _ := io.ReadAll(io.LimitReader(resp.Body, limit))
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("catalog status %d", resp.StatusCode)
+	}
+	// Read one byte past the limit so truncation is an error, not silent
+	// partial data that decodes into a plausible-but-wrong catalog.
+	body, err := io.ReadAll(io.LimitReader(resp.Body, limit+1))
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(body)) > limit {
+		return nil, fmt.Errorf("catalog response exceeds %d bytes", limit)
 	}
 	return body, nil
 }

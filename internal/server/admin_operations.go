@@ -1,6 +1,7 @@
 package server
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -71,6 +72,12 @@ func applyProviderRequest(cfg *Config, req providerUpsertReq) error {
 	}
 	if req.CooldownSeconds < 0 || req.CooldownSeconds > 3600 || req.RequestTimeout < 0 || req.RequestTimeout > 3600 || req.MaxTokens < 0 || req.MaxTokens > 16_777_216 {
 		return fmt.Errorf("provider timeout, cooldown, or output limit is out of range")
+	}
+	// The SSRF guard must hold on PERSIST, not only on the wizard probe:
+	// otherwise a provider aimed at a private/loopback host is committed
+	// even with allow_private_upstreams unset and only the probe refuses.
+	if err := guardProbeHost(context.Background(), strings.ReplaceAll(base, "%ACCOUNT%", "account"), req.AllowPrivateUpstreams); err != nil {
+		return err
 	}
 	p := &ProviderConfig{BaseURL: base, APIFormat: req.APIFormat, AuthHeader: req.AuthHeader, AuthHeaderFormat: req.AuthHeaderFormat, CooldownSeconds: req.CooldownSeconds, RequestTimeout: req.RequestTimeout, NoAuth: req.NoAuth, SynthesizeCLIHeaders: req.SynthesizeCLIHeaders, StripReasoningContent: req.StripReasoning, MaxTokens: req.MaxTokens, AllowPrivateUpstreams: req.AllowPrivateUpstreams, Disabled: req.Disabled}
 	if req.Keys != nil {

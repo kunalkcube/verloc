@@ -25,15 +25,17 @@ type ClientIdentity struct {
 	authHash      [32]byte
 }
 
+// AllowsModel reports whether the key may use the given model. Access must
+// be explicit: "*" allows every model, anything else is an exact-match
+// allowlist, and an empty list allows NOTHING. (Empty used to mean "every
+// model", which silently made a bare key fully unrestricted; stored keys
+// with an empty list are migrated to "*" at load — see loadClientKeys.)
 func (c *ClientIdentity) AllowsModel(id string) bool {
 	if c == nil {
 		return false
 	}
-	if len(c.AllowedModels) == 0 {
-		return true
-	}
 	for _, allowed := range c.AllowedModels {
-		if allowed == id {
+		if allowed == "*" || allowed == id {
 			return true
 		}
 	}
@@ -84,6 +86,12 @@ type clientKeyRequest struct {
 }
 
 func (s *Security) loadClientKeys() error {
+	var migrated []string
+	defer func() {
+		for _, id := range migrated {
+			_, _ = s.control.db.Exec(`UPDATE client_keys SET allowed_models='["*"]' WHERE id=?`, id)
+		}
+	}()
 	rows, err := s.control.db.Query("SELECT id,name,key_hash,prefix,allowed_models,expires_at,rpm,tpm,max_concurrent,created_at,revoked_at FROM client_keys")
 	if err != nil {
 		return fmt.Errorf("load client keys: %w", err)
@@ -99,8 +107,11 @@ func (s *Security) loadClientKeys() error {
 		if len(hash) != sha256.Size || json.Unmarshal([]byte(allowed), &view.AllowedModels) != nil || view.RPM < 0 || view.TPM < 0 || view.MaxConcurrent < 0 {
 			return errors.New("invalid stored client key policy")
 		}
-		if view.AllowedModels == nil {
-			view.AllowedModels = []string{}
+		if len(view.AllowedModels) == 0 {
+			// Migration: an empty stored list meant "every model" when it
+			// was written. Preserve exactly that behaviour, explicitly.
+			view.AllowedModels = []string{"*"}
+			migrated = append(migrated, view.ID)
 		}
 		record := &clientKeyRecord{view: view, usage: &clientUsage{}}
 		copy(record.hash[:], hash)
@@ -162,6 +173,10 @@ func validateClientKeyRequest(req *clientKeyRequest) error {
 			models = append(models, model)
 			seen[model] = true
 		}
+	}
+	if len(models) == 0 {
+		// No silent unrestricted keys: "all models" must be said out loud.
+		return errors.New(`allowed_models must list at least one model ID, or "*" for every model`)
 	}
 	req.AllowedModels = models
 	return nil

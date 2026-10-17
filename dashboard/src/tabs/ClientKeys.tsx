@@ -28,7 +28,7 @@ import {
 import { Switch } from '../components/ui/switch';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '../components/ui/table';
 
-const blank: ClientKeyInput = { name: '', allowed_models: [], expires_at: 0, rpm: 0, tpm: 0, max_concurrent: 0 };
+const blank: ClientKeyInput = { name: '', allowed_models: ['*'], expires_at: 0, rpm: 0, tpm: 0, max_concurrent: 0 };
 
 const toLocalInput = (ts: number) =>
   new Date(ts - new Date(ts).getTimezoneOffset() * 60000).toISOString().slice(0, 16);
@@ -71,7 +71,7 @@ export default function ClientKeys() {
   }, []);
 
   const openCreate = () => {
-    setDraft({ ...blank, allowed_models: [] });
+    setDraft({ ...blank, allowed_models: ['*'] });
     setEditing('');
     setExpiry('');
     setHasExpiry(false);
@@ -163,7 +163,7 @@ export default function ClientKeys() {
     }
   };
 
-  const allModels = !draft || draft.allowed_models.length === 0;
+  const allModels = !draft || draft.allowed_models.includes('*');
   const scopeIds = draft
     ? [...models.map((m) => m.id), ...draft.allowed_models].filter((id, i, arr) => arr.indexOf(id) === i)
     : [];
@@ -174,7 +174,7 @@ export default function ClientKeys() {
   const summary = [
     { label: 'Credentials', value: keys.length, detail: 'Including retained history', accent: '' },
     { label: 'Active', value: activeKeys.length, detail: `${expiredKeys.length} expired`, accent: 'text-primary' },
-    { label: 'Model restricted', value: activeKeys.filter((key) => key.allowed_models?.length).length, detail: 'Among active credentials', accent: 'text-chart-2' },
+    { label: 'Model restricted', value: activeKeys.filter((key) => key.allowed_models?.length && !key.allowed_models.includes('*')).length, detail: 'Among active credentials', accent: 'text-chart-2' },
     { label: 'Revoked', value: keys.filter((key) => key.revoked_at).length, detail: 'Attribution retained', accent: 'text-muted-foreground' },
   ];
 
@@ -260,7 +260,7 @@ export default function ClientKeys() {
                       </TableCell>
                       <TableCell className="max-w-56 whitespace-normal">
                         <div className="text-xs leading-relaxed break-all text-muted-foreground">
-                          {key.allowed_models?.length ? key.allowed_models.join(', ') : <Badge variant="outline">All models</Badge>}
+                          {key.allowed_models?.includes('*') || !key.allowed_models?.length ? <Badge variant="outline">All models (*)</Badge> : key.allowed_models.join(', ')}
                         </div>
                       </TableCell>
                       <TableCell className="text-[11px] whitespace-nowrap">
@@ -377,7 +377,7 @@ export default function ClientKeys() {
                     id="key-all-models"
                     checked={allModels}
                     onCheckedChange={(v) => {
-                      if (v === true) setDraft({ ...draft, allowed_models: [] });
+                      if (v === true) setDraft({ ...draft, allowed_models: ['*'] });
                       else setDraft({ ...draft, allowed_models: models.map((m) => m.id) });
                     }}
                   />

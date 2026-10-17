@@ -168,11 +168,11 @@ func (t *Ticker) run() {
 func scopeTicks(d Delta) (models, backends map[string]tickAgg) {
 	models = map[string]tickAgg{}
 	for k, v := range d.Models {
-		models[k] = tickAgg{Req: v.Requests, TokIn: v.TokIn, TokOut: v.TokOut, TokCache: v.TokCache, Cost: v.Cost}
+		models[k] = tickAgg{Req: v.Requests, Err: v.Err, Failover: v.Failover, TokIn: v.TokIn, TokOut: v.TokOut, TokCache: v.TokCache, Cost: v.Cost}
 	}
 	backends = map[string]tickAgg{}
 	for k, v := range d.Backends {
-		backends[k] = tickAgg{Req: v.Requests, Err: v.Err, TokIn: v.TokIn, TokOut: v.TokOut, TokCache: v.TokCache, Cost: v.Cost}
+		backends[k] = tickAgg{Req: v.Requests, Err: v.Err, Failover: v.Failover, TokIn: v.TokIn, TokOut: v.TokOut, TokCache: v.TokCache, Cost: v.Cost}
 	}
 	return
 }
@@ -192,13 +192,13 @@ func deltaFromTick(td TickDelta) Delta {
 	d.MS = 3000
 	for k, v := range td.Models {
 		d.Models[k] = deltaModel{
-			Requests: int64(v.Req), TokIn: int64(v.TokIn),
+			Requests: int64(v.Req), Err: int64(v.Err), Failover: int64(v.Failover), TokIn: int64(v.TokIn),
 			TokOut: int64(v.TokOut), TokCache: int64(v.TokCache), Cost: v.Cost,
 		}
 	}
 	for k, v := range td.Backends {
 		d.Backends[k] = deltaBackend{
-			Requests: int64(v.Req), Err: int64(v.Err), TokIn: int64(v.TokIn),
+			Requests: int64(v.Req), Err: int64(v.Err), Failover: int64(v.Failover), TokIn: int64(v.TokIn),
 			TokOut: int64(v.TokOut), TokCache: int64(v.TokCache), Cost: v.Cost,
 		}
 	}
@@ -227,6 +227,8 @@ func computeDelta(prev, cur map[string]any) Delta {
 		}
 		m := deltaModel{
 			Requests: diffMapI64(pmap, cmap, "requests"),
+			Err:      diffMapI64(pmap, cmap, "err"),
+			Failover: diffMapI64(pmap, cmap, "failover"),
 			TokIn:    diffMapI64(pmap, cmap, "tok_in"),
 			TokOut:   diffMapI64(pmap, cmap, "tok_out"),
 			TokCache: diffMapI64(pmap, cmap, "tok_cache"),
@@ -248,6 +250,7 @@ func computeDelta(prev, cur map[string]any) Delta {
 		b := deltaBackend{
 			Requests: diffMapI64(pmap, cmap, "requests"),
 			Err:      diffMapI64(pmap, cmap, "err"),
+			Failover: diffMapI64(pmap, cmap, "failover"),
 			TokIn:    diffMapI64(pmap, cmap, "tok_in"),
 			TokOut:   diffMapI64(pmap, cmap, "tok_out"),
 			TokCache: diffMapI64(pmap, cmap, "tok_cache"),

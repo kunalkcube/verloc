@@ -1,12 +1,14 @@
 package server
 
 import (
+	"compress/gzip"
 	"context"
 	"flag"
 	"fmt"
 	"log"
 	"net"
 	"net/http"
+	"net/netip"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -209,6 +211,16 @@ func openGateway(seed *Config, configPath string) (*Server, error) {
 		_ = control.Close()
 		return nil, fmt.Errorf("security: %w", err)
 	}
+	if !seed.SecureCookies {
+		host, _, splitErr := net.SplitHostPort(cfg.Listen)
+		loopback := splitErr == nil && (host == "localhost" || (func() bool {
+			ip, err := netip.ParseAddr(host)
+			return err == nil && ip.IsLoopback()
+		})())
+		if !loopback {
+			log.Printf("[security] WARNING: secure_cookies is false while listening on %q — the owner session cookie will travel without the Secure flag. Put TLS in front of verloc or enable secure_cookies behind your proxy.", cfg.Listen)
+		}
+	}
 	store, err := OpenStore(cfg.Dashboard.DBPath)
 	if err != nil {
 		_ = control.Close()
@@ -285,7 +297,7 @@ func (s *Server) Handler() http.Handler {
 		admin = s.security.AdminMiddleware(mux)
 		client = s.security.ClientMiddleware(mux)
 	}
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	return gzipMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("X-Content-Type-Options", "nosniff")
 		w.Header().Set("X-Frame-Options", "DENY")
 		w.Header().Set("Referrer-Policy", "no-referrer")
@@ -328,8 +340,105 @@ func (s *Server) Handler() http.Handler {
 		default:
 			mux.ServeHTTP(w, r)
 		}
+	}))
+}
+
+// gzipSkipPaths are never compressed: streaming chat/responses bodies and
+// the dashboard SSE feed must flush incrementally, and buffering them
+// through a gzip writer would break commit/idle semantics.
+var gzipSkipPaths = map[string]bool{
+	"/v1/chat/completions": true, "/chat/completions": true,
+	"/v1/responses": true, "/responses": true,
+	"/dash/api/live": true,
+}
+
+// gzipMiddleware compresses text responses (dashboard JSON, /v1/models, …)
+// when the client accepts gzip. Precompressed dashboard assets already carry
+// Content-Encoding and pass through untouched. It uses only the standard
+// library: no dependency, no CGO.
+func gzipMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if gzipSkipPaths[r.URL.Path] || !acceptsGzip(r) {
+			next.ServeHTTP(w, r)
+			return
+		}
+		gw := &gzipResponseWriter{ResponseWriter: w}
+		defer gw.finish()
+		next.ServeHTTP(gw, r)
 	})
 }
+
+type gzipResponseWriter struct {
+	http.ResponseWriter
+	gz      *gzip.Writer
+	decided bool
+	active  bool
+	status  int
+	sent    bool
+}
+
+// WriteHeader is captured, not forwarded: the compress-or-not decision needs
+// the final headers, and those are only complete at the first body write.
+func (g *gzipResponseWriter) WriteHeader(status int) {
+	if g.status == 0 {
+		g.status = status
+	}
+}
+
+// decide makes the one-time compress-or-not call at the first body write,
+// when status and Content-Type are known, then forwards the status line.
+func (g *gzipResponseWriter) decide() {
+	g.decided = true
+	if g.status == 0 {
+		g.status = http.StatusOK
+	}
+	h := g.Header()
+	if g.status == http.StatusOK && h.Get("Content-Encoding") == "" && compressibleType(h.Get("Content-Type")) {
+		h.Set("Content-Encoding", "gzip")
+		h.Add("Vary", "Accept-Encoding")
+		h.Del("Content-Length")
+		g.gz = gzip.NewWriter(g.ResponseWriter)
+		g.active = true
+	}
+	g.ResponseWriter.WriteHeader(g.status)
+	g.sent = true
+}
+
+func (g *gzipResponseWriter) Write(b []byte) (int, error) {
+	if !g.decided {
+		g.decide()
+	}
+	if g.active {
+		return g.gz.Write(b)
+	}
+	return g.ResponseWriter.Write(b)
+}
+
+func (g *gzipResponseWriter) Flush() {
+	if !g.decided {
+		g.decide()
+	}
+	if g.active {
+		_ = g.gz.Flush()
+	}
+	if f, ok := g.ResponseWriter.(http.Flusher); ok {
+		f.Flush()
+	}
+}
+
+func (g *gzipResponseWriter) finish() {
+	if !g.decided {
+		// Handler wrote nothing (e.g. a bare 204): forward the status as-is.
+		g.decide()
+		return
+	}
+	if g.active {
+		_ = g.gz.Close()
+	}
+}
+
+// Unwrap lets http.ResponseController reach the underlying writer.
+func (g *gzipResponseWriter) Unwrap() http.ResponseWriter { return g.ResponseWriter }
 
 func splitComma(s string) []string {
 	parts := strings.Split(s, ",")

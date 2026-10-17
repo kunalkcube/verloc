@@ -20,14 +20,61 @@ import (
 // (discover / test). It works pre-save (explicit base_url + key from the
 // wizard form) or against a saved provider (provider name, server-side key).
 type probeConn struct {
-	baseURL    string
-	apiFormat  string
-	authHeader string
-	authFormat string
-	key        string
-	accountID  string
-	noAuth     bool
-	synthCLI   bool
+	baseURL      string
+	apiFormat    string
+	authHeader   string
+	authFormat   string
+	key          string
+	accountID    string
+	noAuth       bool
+	synthCLI     bool
+	allowPrivate bool
+}
+
+// probeClient returns the HTTP client for wizard probes. Unless private
+// upstreams are explicitly allowed, the dialer re-validates every resolved
+// IP at connect time and pins the checked address — closing the
+// DNS-rebinding gap between guardProbeHost's lookup and the real dial,
+// where a low-TTL name could return a public IP first and a metadata IP
+// second.
+func probeClient(timeoutSec int, allowPrivate bool) *http.Client {
+	c := newClient(timeoutSec)
+	if allowPrivate {
+		return c
+	}
+	if tr, ok := c.Transport.(*http.Transport); ok {
+		dialer := &net.Dialer{Timeout: 10 * time.Second}
+		tr.DialContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
+			host, port, err := net.SplitHostPort(addr)
+			if err != nil {
+				return nil, err
+			}
+			if ip, err := netip.ParseAddr(host); err == nil {
+				if isPrivateIP(ip.Unmap()) {
+					return nil, fmt.Errorf("upstream resolves to a private or local address (%s)", ip)
+				}
+				return dialer.DialContext(ctx, network, addr)
+			}
+			ips, err := net.DefaultResolver.LookupNetIP(ctx, "ip", host)
+			if err != nil || len(ips) == 0 {
+				// Same rule as the guard: only a positive private match
+				// blocks; resolution failure surfaces as a dial error.
+				return dialer.DialContext(ctx, network, addr)
+			}
+			for _, ip := range ips {
+				if isPrivateIP(ip.Unmap()) {
+					return nil, fmt.Errorf("upstream resolves to a private or local address (%s)", ip)
+				}
+			}
+			return dialer.DialContext(ctx, network, net.JoinHostPort(ips[0].String(), port))
+		}
+	}
+	return c
+}
+
+func isPrivateIP(ip netip.Addr) bool {
+	return ip.IsLoopback() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() ||
+		ip.IsPrivate() || ip.IsUnspecified() || ip.IsMulticast()
 }
 
 type probeReq struct {
@@ -67,8 +114,7 @@ func guardProbeHost(ctx context.Context, baseURL string, allowPrivate bool) erro
 		return nil
 	}
 	check := func(ip netip.Addr) error {
-		if ip.IsLoopback() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() ||
-			ip.IsPrivate() || ip.IsUnspecified() || ip.IsMulticast() {
+		if isPrivateIP(ip) {
 			return fmt.Errorf("base_url points at a private or local address (%s); set allow_private_upstreams to permit it", ip)
 		}
 		return nil
@@ -141,9 +187,16 @@ func (s *Server) resolveProbeConn(req probeReq) (probeConn, error) {
 	if !strings.HasPrefix(c.baseURL, "http://") && !strings.HasPrefix(c.baseURL, "https://") {
 		return c, fmt.Errorf("base_url must start with http:// or https://")
 	}
+	c.allowPrivate = allowPrivate
 	// Scheme is not enough: refuse loopback/link-local/private targets unless
-	// the caller opted in (a LAN upstream is a normal self-hosted setup).
-	if err := guardProbeHost(context.Background(), c.baseURL, allowPrivate); err != nil {
+	// the caller opted in (a LAN upstream is a normal self-hosted setup). A
+	// literal %ACCOUNT% placeholder would defeat URL parsing, so substitute
+	// a stand-in for the guard only.
+	guardURL := strings.ReplaceAll(c.baseURL, "%ACCOUNT%", "account")
+	if c.accountID != "" {
+		guardURL = strings.ReplaceAll(c.baseURL, "%ACCOUNT%", c.accountID)
+	}
+	if err := guardProbeHost(context.Background(), guardURL, allowPrivate); err != nil {
 		return c, err
 	}
 	if c.apiFormat != "" && c.apiFormat != "openai" && c.apiFormat != "systemone" {
@@ -199,7 +252,7 @@ func (s *Server) handleAdminDiscover(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	client := newClient(15)
+	client := probeClient(15, conn.allowPrivate)
 	defer client.CloseIdleConnections()
 	models := []discoveredModel{}
 	start := time.Now()
@@ -414,7 +467,7 @@ func (s *Server) handleAdminTest(w http.ResponseWriter, r *http.Request) {
 			"max_tokens": maxTokens, "stream": false,
 		})
 	}
-	client := newClient(30)
+	client := probeClient(30, conn.allowPrivate)
 	defer client.CloseIdleConnections()
 	upReq, err := http.NewRequestWithContext(r.Context(), http.MethodPost, strings.ReplaceAll(targetURL, "%ACCOUNT%", conn.accountID), bytes.NewReader(payload))
 	if err != nil {

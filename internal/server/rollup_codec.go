@@ -96,6 +96,13 @@ func decodeMinutes(blob []byte, models *map[string]deltaModel, backends *map[str
 	if err != nil {
 		return errDimDecode
 	}
+	// Every entry costs at least one byte on the wire, so a count larger
+	// than the remaining input is malformed. Check BEFORE preallocating:
+	// sizing a map/slice from an unchecked count turns a few corrupt bytes
+	// into a gigabyte-scale allocation.
+	if n > uint64(r.Len()) {
+		return errDimDecode
+	}
 	if n > 0 {
 		m := make(map[string]deltaModel, n)
 		for range n {
@@ -128,6 +135,9 @@ func decodeMinutes(blob []byte, models *map[string]deltaModel, backends *map[str
 	}
 	n, err = binary.ReadUvarint(r)
 	if err != nil {
+		return errDimDecode
+	}
+	if n > uint64(r.Len()) {
 		return errDimDecode
 	}
 	if n > 0 {
@@ -166,7 +176,7 @@ func decodeMinutes(blob []byte, models *map[string]deltaModel, backends *map[str
 	// Histograms are optional in the binary form; a short read means the writer
 	// did not include them, which the caller treats as "distributions unknown".
 	if n, err = binary.ReadUvarint(r); err == nil && hist != nil {
-		h := make([]uint64, 0, n)
+		h := make([]uint64, 0, capHint(n, r))
 		for range n {
 			v, err := binary.ReadUvarint(r)
 			if err != nil {
@@ -177,7 +187,7 @@ func decodeMinutes(blob []byte, models *map[string]deltaModel, backends *map[str
 		*hist = h
 	}
 	if n, err = binary.ReadUvarint(r); err == nil && ttftHist != nil {
-		h := make([]uint64, 0, n)
+		h := make([]uint64, 0, capHint(n, r))
 		for range n {
 			v, err := binary.ReadUvarint(r)
 			if err != nil {
@@ -225,6 +235,16 @@ func decodeMinutesJSON(blob []byte, models *map[string]deltaModel, backends *map
 		return json.Unmarshal(blob, ttftHist)
 	}
 	return nil
+}
+
+// capHint bounds a capacity hint by the bytes actually remaining, so a
+// corrupt count cannot force a huge preallocation. Each encoded value
+// costs at least one byte, so Len() is a sound upper bound.
+func capHint(n uint64, r *bytes.Reader) uint64 {
+	if m := uint64(r.Len()); n > m {
+		return m
+	}
+	return n
 }
 
 func putNameCount(b *bytes.Buffer, n int) { putU64(b, uint64(n)) }

@@ -171,6 +171,13 @@ func (s *Security) RegisterRoutes(mux *http.ServeMux) {
 func securityNoStore(w http.ResponseWriter) { w.Header().Set("Cache-Control", "no-store") }
 
 func decodeSecurityJSON(w http.ResponseWriter, r *http.Request, out any) bool {
+	// The login slot is acquired BEFORE this decode, and there is no server
+	// ReadTimeout — without a deadline, two clients that send headers and
+	// then stall the body hold both slots forever and the owner can never
+	// log in. Ten seconds is generous for a ≤64 KiB body.
+	rc := http.NewResponseController(w)
+	_ = rc.SetReadDeadline(time.Now().Add(10 * time.Second))
+	defer func() { _ = rc.SetReadDeadline(time.Time{}) }()
 	r.Body = http.MaxBytesReader(w, r.Body, 64<<10)
 	dec := json.NewDecoder(r.Body)
 	dec.DisallowUnknownFields()

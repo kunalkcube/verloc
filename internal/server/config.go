@@ -134,16 +134,16 @@ func (l *GatewayLimits) applyDefaults() {
 		l.RetryBudgetSeconds = 30
 	}
 	if l.QueueTimeoutSeconds == 0 {
-		l.QueueTimeoutSeconds = 10
+		l.QueueTimeoutSeconds = 30
 	}
 	if l.MaxInFlight == 0 {
-		l.MaxInFlight = 64
+		l.MaxInFlight = 512
 	}
 	if l.MaxQueued == 0 {
 		l.MaxQueued = 128
 	}
 	if l.StreamIdleTimeoutSeconds == 0 {
-		l.StreamIdleTimeoutSeconds = 60
+		l.StreamIdleTimeoutSeconds = 120
 	}
 }
 
