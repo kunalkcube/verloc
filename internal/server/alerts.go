@@ -241,16 +241,32 @@ func NewAlertEngine(store *Store, hub *Hub, rules []AlertRule) *AlertEngine {
 }
 
 func defaultAlertRules() []AlertRule {
+	// Every rule declares a cooldown. These values are load-bearing: a zero
+	// cooldown suppresses nothing (see DefaultAlertCooldownSec), so a rule that
+	// omits it re-fires on every eval while its condition holds.
+	const cd = DefaultAlertCooldownSec
 	return []AlertRule{
-		{ID: "error-rate-global", Metric: "error_rate", Scope: "global", Threshold: 5, WindowSec: 300, Severity: "warning"},
-		{ID: "failover-global", Metric: "failover_rate", Scope: "global", Threshold: 10, WindowSec: 300, Severity: "warning"},
-		{ID: "cost-hour-global", Metric: "cost_per_hour", Scope: "global", Threshold: 0.50, WindowSec: 3600, Severity: "info"},
-		{ID: "latency-p95-global", Metric: "latency_p95", Scope: "global", Threshold: 10000, WindowSec: 600, Severity: "warning"},
-		{ID: "keys-cooldown-global", Metric: "keys_in_cooldown", Scope: "global", Threshold: 1, WindowSec: 0, Severity: "warning"},
+		{ID: "error-rate-global", Metric: "error_rate", Scope: "global", Threshold: 5, WindowSec: 300, Severity: "warning", CooldownSec: cd},
+		{ID: "failover-global", Metric: "failover_rate", Scope: "global", Threshold: 10, WindowSec: 300, Severity: "warning", CooldownSec: cd},
+		{ID: "cost-hour-global", Metric: "cost_per_hour", Scope: "global", Threshold: 0.50, WindowSec: 3600, Severity: "info", CooldownSec: cd},
+		{ID: "latency-p95-global", Metric: "latency_p95", Scope: "global", Threshold: 10000, WindowSec: 600, Severity: "warning", CooldownSec: cd},
+		{ID: "keys-cooldown-global", Metric: "keys_in_cooldown", Scope: "global", Threshold: 1, WindowSec: 0, Severity: "warning", CooldownSec: cd},
 		{ID: "telemetry-errors", Metric: "telemetry_errors", Scope: "global", Threshold: 1, WindowSec: 0, Severity: "critical", CooldownSec: 300},
 		{ID: "telemetry-pressure", Metric: "telemetry_queued", Scope: "global", Threshold: 1536, WindowSec: 0, Severity: "warning", CooldownSec: 300},
 	}
 }
+
+// DefaultAlertCooldownSec is the suppression window applied to any rule that does
+// not specify one. It matches the documented default on AlertRule.CooldownSec and
+// the value applyDefaults already uses for user-configured rules.
+//
+// This matters because a zero cooldown is not "no suppression configured" — it is
+// "never suppress", which is how a sustained condition came to re-fire on every
+// 5s eval: `now.Sub(last) < 0*second` is always false, so the guard can never
+// trip. A rule with no cooldown therefore emits one row (and one log line, and one
+// SSE publish) per eval for as long as the condition holds, which measured at
+// 720 rows/hour per rule and made the alerts table 22% of the analytics DB.
+const DefaultAlertCooldownSec = 900
 
 // Feed forwards a tick into the aggregator.
 func (e *AlertEngine) Feed(t tickAgg, models, backends map[string]tickAgg) {
@@ -479,9 +495,26 @@ func (e *AlertEngine) SetRules(rules []AlertRule) {
 	e.mu.Unlock()
 }
 
+// withDefaultCooldown returns rules with a cooldown applied to every rule that
+// does not specify one, so no construction path can yield a rule that re-fires on
+// every eval. It runs on a copy and never mutates the caller's slice.
+//
+// Equivalent normalisation lives in applyDefaults for user-configured rules and
+// in the admin write path for rule edits; this is the single place that also
+// covers the built-in fallback rules and anything constructed directly.
+func withDefaultCooldown(rules []AlertRule) []AlertRule {
+	out := append([]AlertRule(nil), rules...)
+	for i := range out {
+		if out[i].CooldownSec == 0 {
+			out[i].CooldownSec = DefaultAlertCooldownSec
+		}
+	}
+	return out
+}
+
 func telemetryAlertRules(rules []AlertRule) []AlertRule {
 	if len(rules) == 0 {
-		return defaultAlertRules()
+		return withDefaultCooldown(defaultAlertRules())
 	}
 	out := append([]AlertRule(nil), rules...)
 	for _, rule := range defaultAlertRules() {
@@ -499,5 +532,5 @@ func telemetryAlertRules(rules []AlertRule) []AlertRule {
 			out = append(out, rule)
 		}
 	}
-	return out
+	return withDefaultCooldown(out)
 }
