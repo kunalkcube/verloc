@@ -224,8 +224,9 @@ func (s *Security) handleClientKeyCreate(w http.ResponseWriter, r *http.Request)
 	}
 	view := ClientKeyView{ID: "ck_" + id, Name: req.Name, Prefix: prefix, AllowedModels: req.AllowedModels, ExpiresAt: req.ExpiresAt, RPM: req.RPM, TPM: req.TPM, MaxConcurrent: req.MaxConcurrent, CreatedAt: time.Now().UnixMilli()}
 	allowed, _ := json.Marshal(view.AllowedModels)
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	// Durability before exposure: commit the new secret to SQLite first, then take
+	// s.mu only to publish it into the in-memory maps. The mutex is never held
+	// across I/O, so an owner click cannot stall inference traffic.
 	tx, err := s.control.db.BeginTx(r.Context(), nil)
 	if err != nil {
 		writeErr(w, 500, "client key creation failed")
@@ -244,8 +245,10 @@ func (s *Security) handleClientKeyCreate(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	record := &clientKeyRecord{view: view, hash: hash, usage: &clientUsage{}, identity: &ClientIdentity{ID: view.ID, Name: view.Name, AllowedModels: view.AllowedModels, TPM: view.TPM, authHash: hash}}
+	s.mu.Lock()
 	s.clients[view.ID] = record
 	s.keys[hash] = record
+	s.mu.Unlock()
 	writeJSON(w, http.StatusCreated, map[string]any{"key": key, "client": view})
 }
 
@@ -261,18 +264,25 @@ func (s *Security) handleClientKeyEdit(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 400, err.Error())
 		return
 	}
+	// Peek at the existing record under a short lock to derive the new policy and
+	// reject an already-revoked/missing key, then release s.mu for the DB write.
+	// The final publish re-reads under the lock, because the record may have been
+	// revoked/replaced between this peek and publication.
+	id := r.PathValue("id")
 	s.mu.Lock()
-	defer s.mu.Unlock()
-	old := s.clients[r.PathValue("id")]
+	old := s.clients[id]
 	if old == nil {
+		s.mu.Unlock()
 		writeErr(w, 404, "client key not found")
 		return
 	}
 	if old.view.RevokedAt != 0 {
+		s.mu.Unlock()
 		writeErr(w, 409, "client key is revoked")
 		return
 	}
 	view := old.view
+	s.mu.Unlock()
 	view.Name, view.AllowedModels, view.ExpiresAt = req.Name, req.AllowedModels, req.ExpiresAt
 	view.RPM, view.TPM, view.MaxConcurrent = req.RPM, req.TPM, req.MaxConcurrent
 	allowed, _ := json.Marshal(view.AllowedModels)
@@ -293,8 +303,25 @@ func (s *Security) handleClientKeyEdit(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 500, "client key update failed")
 		return
 	}
-	record := &clientKeyRecord{view: view, hash: old.hash, usage: old.usage, identity: &ClientIdentity{ID: view.ID, Name: view.Name, AllowedModels: view.AllowedModels, TPM: view.TPM, authHash: old.hash}}
+	// Publish under s.mu. Re-read so a concurrent revoke wins: publishing the old
+	// snapshot would clobber the in-memory revocation (fail-closed invariant). The
+	// usage pointer is carried from the *current* record so the live quota window
+	// is never refilled by a policy edit.
+	s.mu.Lock()
+	current := s.clients[id]
+	if current == nil {
+		s.mu.Unlock()
+		writeErr(w, 404, "client key not found")
+		return
+	}
+	if current.view.RevokedAt != 0 {
+		s.mu.Unlock()
+		writeErr(w, 409, "client key is revoked")
+		return
+	}
+	record := &clientKeyRecord{view: view, hash: current.hash, usage: current.usage, identity: &ClientIdentity{ID: view.ID, Name: view.Name, AllowedModels: view.AllowedModels, TPM: view.TPM, authHash: current.hash}}
 	s.clients[view.ID], s.keys[record.hash] = record, record
+	s.mu.Unlock()
 	writeJSON(w, 200, map[string]any{"client": view})
 }
 
@@ -307,18 +334,24 @@ func (s *Security) handleClientKeyRotate(w http.ResponseWriter, r *http.Request)
 		writeErr(w, 500, "client key rotation failed")
 		return
 	}
+	// Peek under a short lock to reject missing/revoked keys and capture the
+	// stable ID/hash, then release s.mu for the DB write. Unlike revoke, rotation
+	// introduces a new secret, so the commit must land before publication.
+	id := r.PathValue("id")
 	s.mu.Lock()
-	defer s.mu.Unlock()
-	old := s.clients[r.PathValue("id")]
+	old := s.clients[id]
 	if old == nil {
+		s.mu.Unlock()
 		writeErr(w, 404, "client key not found")
 		return
 	}
 	if old.view.RevokedAt != 0 {
+		s.mu.Unlock()
 		writeErr(w, 409, "client key is revoked")
 		return
 	}
 	view := old.view
+	s.mu.Unlock()
 	view.Prefix = prefix
 	tx, err := s.control.db.BeginTx(r.Context(), nil)
 	if err != nil {
@@ -337,9 +370,24 @@ func (s *Security) handleClientKeyRotate(w http.ResponseWriter, r *http.Request)
 		writeErr(w, 500, "client key rotation failed")
 		return
 	}
-	record := &clientKeyRecord{view: view, hash: hash, usage: old.usage, identity: &ClientIdentity{ID: view.ID, Name: view.Name, AllowedModels: view.AllowedModels, TPM: view.TPM, authHash: hash}}
-	delete(s.keys, old.hash)
+	// Publish under s.mu. Re-read so a concurrent revoke/rotate is not clobbered;
+	// usage is carried from the current record to preserve the live quota window.
+	s.mu.Lock()
+	current := s.clients[id]
+	if current == nil {
+		s.mu.Unlock()
+		writeErr(w, 404, "client key not found")
+		return
+	}
+	if current.view.RevokedAt != 0 {
+		s.mu.Unlock()
+		writeErr(w, 409, "client key is revoked")
+		return
+	}
+	record := &clientKeyRecord{view: view, hash: hash, usage: current.usage, identity: &ClientIdentity{ID: view.ID, Name: view.Name, AllowedModels: view.AllowedModels, TPM: view.TPM, authHash: hash}}
+	delete(s.keys, current.hash)
 	s.keys[hash], s.clients[view.ID] = record, record
+	s.mu.Unlock()
 	writeJSON(w, 200, map[string]any{"key": key, "client": view})
 }
 
@@ -347,34 +395,44 @@ func (s *Security) handleClientKeyRevoke(w http.ResponseWriter, r *http.Request)
 	if !s.CheckAdmin(w, r) {
 		return
 	}
+	// Revocation must take effect immediately: publish the in-memory revocation
+	// (drop the hash from s.keys, stamp RevokedAt) BEFORE the DB write, so inference
+	// traffic is denied the moment the owner clicks. If the DB write then fails the
+	// in-memory revocation stands (fail-closed) and can be retried — a failed write
+	// must never silently re-enable a revoked key.
+	id := r.PathValue("id")
 	s.mu.Lock()
-	defer s.mu.Unlock()
-	record := s.clients[r.PathValue("id")]
+	record := s.clients[id]
 	if record == nil {
+		s.mu.Unlock()
 		writeErr(w, 404, "client key not found")
 		return
 	}
-	if record.view.RevokedAt == 0 {
-		revoked := time.Now().UnixMilli()
-		tx, err := s.control.db.BeginTx(r.Context(), nil)
-		if err != nil {
-			writeErr(w, 500, "client key revocation failed")
-			return
-		}
-		defer tx.Rollback()
-		_, err = tx.Exec("UPDATE client_keys SET revoked_at=? WHERE id=?", revoked, record.view.ID)
-		if err == nil {
-			err = securityAudit(tx, "client_key.revoke", record.view.ID)
-		}
-		if err == nil {
-			err = tx.Commit()
-		}
-		if err != nil {
-			writeErr(w, 500, "client key revocation failed")
-			return
-		}
-		record.view.RevokedAt = revoked
-		delete(s.keys, record.hash)
+	if record.view.RevokedAt != 0 {
+		s.mu.Unlock()
+		writeJSON(w, 200, map[string]bool{"ok": true})
+		return
+	}
+	revoked := time.Now().UnixMilli()
+	record.view.RevokedAt = revoked
+	delete(s.keys, record.hash)
+	s.mu.Unlock()
+	tx, err := s.control.db.BeginTx(r.Context(), nil)
+	if err != nil {
+		writeErr(w, 500, "client key revocation failed")
+		return
+	}
+	defer tx.Rollback()
+	_, err = tx.Exec("UPDATE client_keys SET revoked_at=? WHERE id=?", revoked, record.view.ID)
+	if err == nil {
+		err = securityAudit(tx, "client_key.revoke", record.view.ID)
+	}
+	if err == nil {
+		err = tx.Commit()
+	}
+	if err != nil {
+		writeErr(w, 500, "client key revocation failed")
+		return
 	}
 	writeJSON(w, 200, map[string]bool{"ok": true})
 }

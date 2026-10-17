@@ -43,8 +43,11 @@ func (t tickAgg) TTFTAvgMs() float64 {
 	return 0
 }
 
-func (t *tickAgg) merge(o tickAgg) {
-	// Histograms are additive; percentile estimates are derived only after merge.
+// add accumulates o into t: counters, both histograms and max TS. It performs
+// NO percentile math, so folding many ticks together stays O(buckets) and can be
+// done before the distribution is final. Call finalize once afterwards when
+// P50/P95/P99 are needed.
+func (t *tickAgg) add(o tickAgg) {
 	t.Req += o.Req
 	t.Err += o.Err
 	t.Failover += o.Failover
@@ -62,12 +65,26 @@ func (t *tickAgg) merge(o tickAgg) {
 	for i, v := range o.TTFTHist {
 		t.TTFTHist[i] += v
 	}
-	t.P50Ms = histogramPercentile(t.LatHist, 50)
-	t.P95Ms = histogramPercentile(t.LatHist, 95)
-	t.P99Ms = histogramPercentile(t.LatHist, 99)
 	if o.TS > t.TS {
 		t.TS = o.TS
 	}
+}
+
+// finalize derives the latency percentile estimates from the accumulated
+// histogram. Call it once after the last add so a merged aggregate reports the
+// distribution it actually holds (a zero histogram yields zero percentiles).
+func (t *tickAgg) finalize() {
+	t.P50Ms = histogramPercentile(t.LatHist, 50)
+	t.P95Ms = histogramPercentile(t.LatHist, 95)
+	t.P99Ms = histogramPercentile(t.LatHist, 99)
+}
+
+// merge accumulates o and immediately derives percentiles. Percentiles are
+// order-independent over additive histograms, so this is equivalent to
+// add followed by finalize and is kept for ad-hoc callers.
+func (t *tickAgg) merge(o tickAgg) {
+	t.add(o)
+	t.finalize()
 }
 
 // Aggregator keeps a rolling view of per-tick activity: a 24h global tick
@@ -109,7 +126,10 @@ func (a *Aggregator) scope(name string) *scopeAgg {
 func (a *Aggregator) minute(s *scopeAgg, minute int64, t tickAgg) {
 	t.TS = minute * 60000
 	v := s.minutes[minute]
-	v.merge(t)
+	// Fold the tick into the minute bucket without deriving percentiles: the
+	// bucket's histogram is what matters, and SumScope finalizes once after
+	// merging all buckets in range.
+	v.add(t)
 	s.minutes[minute] = v
 	if len(s.minutes) > a.maxMinute*2 {
 		cutoff := minute - int64(a.maxMinute)
@@ -154,16 +174,17 @@ func (a *Aggregator) Sum(sec int) tickAgg {
 		for i := 0; i < n; i++ {
 			t := a.global[(a.gHead+i)%n]
 			if t.TS >= cutoff && t.TS > 0 {
-				out.merge(t)
+				out.add(t)
 			}
 		}
 	} else {
 		for i := 0; i < a.gHead; i++ {
 			if a.global[i].TS >= cutoff && a.global[i].TS > 0 {
-				out.merge(a.global[i])
+				out.add(a.global[i])
 			}
 		}
 	}
+	out.finalize()
 	return out
 }
 
@@ -180,9 +201,10 @@ func (a *Aggregator) SumScope(scope string, sec int) (tickAgg, bool) {
 	var out tickAgg
 	for k, v := range s.minutes {
 		if k >= cutoffMin {
-			out.merge(v)
+			out.add(v)
 		}
 	}
+	out.finalize()
 	if out.Req == 0 && out.Err == 0 {
 		return tickAgg{}, false
 	}
@@ -197,8 +219,13 @@ type AlertEngine struct {
 	agg      *Aggregator
 	mu       sync.Mutex
 	cooldown map[string]time.Time
-	recent   []AlertEvent
-	recentN  int
+
+	// recent is a fixed-size ring buffer of the last recentN alerts. Unlike an
+	// append-and-reslice it never regrows and reclaims old entries in place.
+	recent     []AlertEvent
+	recentN    int
+	recentHead int  // next write slot
+	recentFull bool // true once the ring has wrapped
 }
 
 func NewAlertEngine(store *Store, hub *Hub, rules []AlertRule) *AlertEngine {
@@ -269,9 +296,9 @@ func (e *AlertEngine) evalRule(r *AlertRule, now time.Time, keyCooldown func() i
 			}
 			value = t.Cost / hrs
 		case "rps":
-			value = float64(t.Req) / float64(r.WindowSec)
+			value = float64(t.Req) / windowDivisor(r.WindowSec)
 		case "tokens_per_hour":
-			value = float64(t.TokIn+t.TokOut) / float64(r.WindowSec) * 3600
+			value = float64(t.TokIn+t.TokOut) / windowDivisor(r.WindowSec) * 3600
 		case "latency_p95":
 			if t.LatN > 0 {
 				value = t.P95Ms
@@ -306,9 +333,9 @@ func (e *AlertEngine) evalRule(r *AlertRule, now time.Time, keyCooldown func() i
 			}
 			value = t.Cost / hrs
 		case "rps":
-			value = float64(t.Req) / float64(r.WindowSec)
+			value = float64(t.Req) / windowDivisor(r.WindowSec)
 		case "tokens_per_hour":
-			value = float64(t.TokIn+t.TokOut) / float64(r.WindowSec) * 3600
+			value = float64(t.TokIn+t.TokOut) / windowDivisor(r.WindowSec) * 3600
 		case "latency_p95":
 			if t.LatN > 0 {
 				value = t.P95Ms
@@ -344,10 +371,7 @@ func (e *AlertEngine) evalRule(r *AlertRule, now time.Time, keyCooldown func() i
 		Threshold: r.Threshold,
 		Message:   alertMessage(r, value),
 	}
-	e.recent = append(e.recent, ev)
-	if len(e.recent) > e.recentN {
-		e.recent = e.recent[1:]
-	}
+	e.pushRecent(ev)
 	if e.store != nil {
 		if err := e.store.InsertAlert(ev); err != nil {
 			log.Printf("[alerts] persist: %v", err)
@@ -381,16 +405,47 @@ func formatNum(v float64) string {
 	return strconv.FormatFloat(v, 'f', 2, 64)
 }
 
+// windowDivisor returns sec as a divisor that is never zero, so rate metrics
+// cannot produce Inf/NaN when a rule has a non-positive window. Matches the
+// cost_per_hour guard (hrs defaults to 1).
+func windowDivisor(sec int) float64 {
+	if sec <= 0 {
+		return 1
+	}
+	return float64(sec)
+}
+
+// pushRecent writes ev into the fixed-size ring, reclaiming the oldest slot in
+// place. Callers must hold e.mu.
+func (e *AlertEngine) pushRecent(ev AlertEvent) {
+	if e.recentN < 1 {
+		return
+	}
+	if len(e.recent) != e.recentN {
+		e.recent = make([]AlertEvent, e.recentN)
+	}
+	e.recent[e.recentHead] = ev
+	e.recentHead = (e.recentHead + 1) % len(e.recent)
+	if e.recentHead == 0 {
+		e.recentFull = true
+	}
+}
+
 // Recent returns recent alerts, newest first.
 func (e *AlertEngine) Recent(n int) []AlertEvent {
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	if n <= 0 || n > len(e.recent) {
-		n = len(e.recent)
+	count := len(e.recent)
+	if !e.recentFull {
+		count = e.recentHead
 	}
-	out := make([]AlertEvent, n)
+	if n <= 0 || n > count {
+		n = count
+	}
+	out := make([]AlertEvent, 0, n)
 	for i := 0; i < n; i++ {
-		out[i] = e.recent[len(e.recent)-1-i]
+		idx := (e.recentHead - 1 - i + len(e.recent)) % len(e.recent)
+		out = append(out, e.recent[idx])
 	}
 	return out
 }
@@ -408,6 +463,19 @@ func (e *AlertEngine) SetRules(rules []AlertRule) {
 	rules = telemetryAlertRules(rules)
 	e.mu.Lock()
 	e.rules = rules
+	// Drop cooldown state for rule IDs that no longer exist so the map cannot
+	// grow without bound across rule edits. Surviving rules keep their cooldown.
+	if len(e.cooldown) > 0 {
+		live := make(map[string]struct{}, len(rules))
+		for i := range rules {
+			live[rules[i].ID] = struct{}{}
+		}
+		for id := range e.cooldown {
+			if _, ok := live[id]; !ok {
+				delete(e.cooldown, id)
+			}
+		}
+	}
 	e.mu.Unlock()
 }
 

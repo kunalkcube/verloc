@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net"
 	"net/http"
 	"regexp"
@@ -29,6 +30,13 @@ var hopByHop = map[string]bool{
 	"Transfer-Encoding":   true,
 	"Upgrade":             true,
 }
+
+// maxSSELineBytes bounds a single SSE line. bufio.Scanner returns ErrTooLong
+// past the limit, which would abort an otherwise healthy stream, so this is
+// generous: providers occasionally coalesce large deltas (base64 images, big
+// tool-call arguments) into one event. The buffer grows on demand, so a large
+// limit costs nothing for ordinary traffic.
+const maxSSELineBytes = 8 << 20
 
 // Matches balance / rate-limit style errors in a 400 body so we can fail over.
 var balanceRe = regexp.MustCompile(`(?i)(insufficient|quota|balance|credit|rate.?limit|try again later|payment)`)
@@ -314,6 +322,40 @@ func proxyError(w http.ResponseWriter, status int, message string) {
 	_ = json.NewEncoder(w).Encode(map[string]any{"error": map[string]string{"message": message, "type": "gateway_error"}})
 }
 
+// trackingResponseWriter records whether any bytes were committed to the
+// client. The panic recovery in forward needs this: before the first write a
+// 500 is still deliverable, after it the only correct action is to abort the
+// connection (appending JSON to a half-written body would corrupt it).
+type trackingResponseWriter struct {
+	http.ResponseWriter
+	wrote bool
+}
+
+// Unwrap lets http.ResponseController reach SetReadDeadline/SetWriteDeadline
+// and Flush on the real writer through this wrapper.
+func (w *trackingResponseWriter) Unwrap() http.ResponseWriter { return w.ResponseWriter }
+
+func (w *trackingResponseWriter) WriteHeader(status int) {
+	w.wrote = true
+	w.ResponseWriter.WriteHeader(status)
+}
+
+func (w *trackingResponseWriter) Write(p []byte) (int, error) {
+	w.wrote = true
+	return w.ResponseWriter.Write(p)
+}
+
+// FlushError keeps the streaming path's interface check working through the
+// wrapper; without it a wrapped writer silently loses per-chunk flushing.
+func (w *trackingResponseWriter) FlushError() error {
+	_ = http.NewResponseController(w.ResponseWriter).SetWriteDeadline(time.Now().Add(time.Minute))
+	err := http.NewResponseController(w.ResponseWriter).Flush()
+	if errors.Is(err, http.ErrNotSupported) {
+		return nil
+	}
+	return err
+}
+
 type requestMetadata struct {
 	Model         string `json:"model"`
 	Stream        bool   `json:"stream"`
@@ -444,6 +486,10 @@ func prepareTPMRequest(raw []byte, metadata requestMetadata, cfg *Config, endpoi
 }
 
 func (s *Server) forward(w http.ResponseWriter, r *http.Request, endpoint string) {
+	// Wrap first so the panic recovery below can determine whether a response
+	// was already committed to the client.
+	tw := &trackingResponseWriter{ResponseWriter: w}
+	w = tw
 	start := time.Now()
 	rt := s.runtime()
 	limits := rt.cfg.Limits
@@ -458,6 +504,20 @@ func (s *Server) forward(w http.ResponseWriter, r *http.Request, endpoint string
 	var lease *ClientLease
 	var selectedPrice requestPrice
 	defer func() {
+		// A panic anywhere in forward() must not take down the process or
+		// lose the request record. net/http only recovers the connection, and
+		// we have no other recover on the request path (proxy_test.go covers
+		// the base64/regex/decoder paths but nothing will ever be complete).
+		// The tracking writer tells us whether a 5xx is still sendable: once
+		// bytes are committed mid-stream we can only abort the connection.
+		if p := recover(); p != nil {
+			rec.OK, rec.Status, rec.Outcome = false, 500, "internal_error"
+			rec.ErrMsg = "gateway internal error"
+			log.Printf("[panic] request=%s model=%s recovered: %v", rec.ID, rec.Model, p)
+			if tw, ok := w.(*trackingResponseWriter); ok && !tw.wrote {
+				proxyError(w, 500, "gateway internal error")
+			}
+		}
 		if !rec.OK && r.Context().Err() != nil {
 			rec.OK, rec.Status, rec.Outcome, rec.ErrMsg = false, 499, "canceled", "client canceled"
 		}
@@ -478,8 +538,11 @@ func (s *Server) forward(w http.ResponseWriter, r *http.Request, endpoint string
 		}
 		if s.store != nil {
 			s.store.QueueRequest(rec)
-		}
-		if s.recent != nil {
+		} else if s.recent != nil {
+			// The in-memory ring is only the fallback source for
+			// /dash/api/recent; when the analytics store is present it is the
+			// authority and the ring would be a third copy of the same record
+			// (plus a crypto/rand shortID) on every request.
 			s.recent.Add(rec)
 		}
 		if s.hub != nil {
@@ -514,7 +577,7 @@ func (s *Server) forward(w http.ResponseWriter, r *http.Request, endpoint string
 	defer s.releaseGateway()
 	controller := http.NewResponseController(w)
 	_ = controller.SetReadDeadline(time.Now().Add(time.Duration(limits.QueueTimeoutSeconds) * time.Second))
-	r.Body = http.MaxBytesReader(w, r.Body, limits.MaxBodyBytes)
+	r.Body = http.MaxBytesReader(tw.ResponseWriter, r.Body, limits.MaxBodyBytes)
 	raw, err := io.ReadAll(r.Body)
 	_ = r.Body.Close()
 	_ = controller.SetReadDeadline(time.Time{})
@@ -703,7 +766,10 @@ func (s *Server) forward(w http.ResponseWriter, r *http.Request, endpoint string
 				}
 				err = streamCopyWithUsage(streamWriter, idle, func(i, o, c uint64) {
 					rec.TokIn, rec.TokOut, rec.TokCache, rec.UsageKnown = i, o, c, true
-				}, func() { rec.TTFTMs = float64(time.Since(start).Nanoseconds()) / 1e6 }, acc)
+				}, func() { rec.TTFTMs = float64(time.Since(start).Nanoseconds()) / 1e6 }, streamOptions{
+					aliasReasoning: !b.stripReasoning,
+					acc:            acc,
+				})
 				budgetTimer.Stop()
 				idle.Close()
 				cancel()
@@ -738,11 +804,30 @@ func (s *Server) forward(w http.ResponseWriter, r *http.Request, endpoint string
 					return // The first client write permanently commits this route.
 				}
 			} else {
+				// The retry budget bounds how long we will keep trying to find a
+				// usable upstream, NOT how long a healthy upstream may take to
+				// generate a response. Once a 200 is in hand the upstream has
+				// accepted the work, so stop the budget here — otherwise a slow
+				// reasoning model (or the sum of several retried attempts) gets
+				// its own valid response thrown away and reported as 502/504.
+				// Mirror of the streaming path's beforeCommit check.
+				if !budgetTimer.Stop() || ctx.Err() != nil {
+					_ = resp.Body.Close()
+					cancel()
+					b.pool.RecordErr(ks)
+					finishAttempt(502, "interrupted")
+					lastStatus = 502
+					continue
+				}
+				// A stall guard still applies: the upstream must keep sending.
+				// The idle reader cancels the context on inactivity so a hung
+				// connection cannot pin a request forever.
+				idleTimeout := time.Duration(limits.StreamIdleTimeoutSeconds) * time.Second
+				idle := newIdleReader(resp.Body, idleTimeout, cancel)
 				var body []byte
-				body, err = io.ReadAll(io.LimitReader(resp.Body, (64<<20)+1))
-				_ = resp.Body.Close()
-				stopped := budgetTimer.Stop()
-				if err == nil && (!stopped || ctx.Err() != nil || len(body) > 64<<20 || !json.Valid(body)) {
+				body, err = io.ReadAll(io.LimitReader(idle, (64<<20)+1))
+				_ = idle.Close()
+				if err == nil && (len(body) > 64<<20 || !json.Valid(body)) {
 					err = errors.New("incomplete upstream response")
 				}
 				cancel()
@@ -1374,13 +1459,55 @@ type streamClientError struct{ err error }
 func (e *streamClientError) Error() string { return "client stream write failed" }
 func (e *streamClientError) Unwrap() error { return e.err }
 
+// streamOptions tunes per-chunk work. The zero value is the correct default
+// for a stripping backend: no reasoning alias, no accumulator.
+type streamOptions struct {
+	// aliasReasoning copies delta.reasoning onto reasoning_content so clients
+	// that only read the DeepSeek field still see thinking. Only needed when
+	// the backend does NOT strip reasoning; running it unconditionally cost a
+	// full JSON decode per chunk for a field that was about to be discarded.
+	aliasReasoning bool
+	// acc collects reasoning + tool_call ids for the replay cache. nil when the
+	// backend strips reasoning.
+	acc *sseReasoningAcc
+}
+
+// usageMarker gates the per-chunk usage parse. Usage appears only in the final
+// chunk of a stream, so scanning for the key first avoids a full JSON decode
+// on every chunk. A false negative here only means the terminal usage chunk is
+// missed, which is caught by the same parse on the final event anyway.
+var usageMarker = []byte(`"usage"`)
+
 // streamCopyWithUsage reports an interrupted stream unless a protocol terminal
 // marker was observed. A 200 header alone is never evidence of completion.
-func streamCopyWithUsage(w http.ResponseWriter, src io.Reader, onUsage func(in, out, cache uint64), onFirst func(), acc *sseReasoningAcc) error {
+//
+// Flushing happens once per SSE event (at the blank-line boundary) rather than
+// once per line: a standard `data: {...}\n\n` event is two lines, so per-line
+// flushing doubled the write syscalls, the Flush calls and the
+// SetWriteDeadline calls for every chunk.
+func streamCopyWithUsage(w http.ResponseWriter, src io.Reader, onUsage func(in, out, cache uint64), onFirst func(), opts streamOptions) error {
 	scanner := bufio.NewScanner(src)
-	scanner.Buffer(make([]byte, 4096), 1<<20)
+	scanner.Buffer(make([]byte, 4096), maxSSELineBytes)
 	terminal, finished, failed := false, false, false
 	flusher, _ := w.(http.Flusher)
+	var eventBuf []byte
+	flushEvent := func() error {
+		if len(eventBuf) == 0 {
+			return nil
+		}
+		if _, err := w.Write(eventBuf); err != nil {
+			return &streamClientError{err}
+		}
+		eventBuf = eventBuf[:0]
+		if f, ok := w.(interface{ FlushError() error }); ok {
+			if err := f.FlushError(); err != nil {
+				return &streamClientError{err}
+			}
+		} else if flusher != nil {
+			flusher.Flush()
+		}
+		return nil
+	}
 	for scanner.Scan() {
 		line := scanner.Text()
 		outLine := line
@@ -1413,28 +1540,33 @@ func streamCopyWithUsage(w http.ResponseWriter, src io.Reader, onUsage func(in, 
 						}
 					}
 				}
-				if in, out, cache, known := usageOf(data); known && onUsage != nil {
-					onUsage(in, out, cache)
+				if onUsage != nil && bytes.Contains(data, usageMarker) {
+					if in, out, cache, known := usageOf(data); known {
+						onUsage(in, out, cache)
+					}
 				}
-				acc.ingest(data)
-				if rewritten, ok := aliasReasoningInChunk(data); ok {
-					outLine = "data: " + string(rewritten)
+				if opts.acc != nil {
+					opts.acc.ingest(data)
+				}
+				if opts.aliasReasoning {
+					if rewritten, ok := aliasReasoningInChunk(data); ok {
+						outLine = "data: " + string(rewritten)
+					}
 				}
 			}
 		}
-		if _, err := io.WriteString(w, outLine+"\n"); err != nil {
-			return &streamClientError{err}
-		}
-		if onFirst != nil && line != "" {
+		eventBuf = append(eventBuf, outLine...)
+		eventBuf = append(eventBuf, '\n')
+		if onFirst != nil && strings.HasPrefix(line, "data:") {
 			onFirst()
 			onFirst = nil
 		}
-		if f, ok := w.(interface{ FlushError() error }); ok {
-			if err := f.FlushError(); err != nil {
-				return &streamClientError{err}
+		// An empty line terminates an SSE event: that is the only point where
+		// the client needs the bytes, so it is the only point we flush.
+		if line == "" {
+			if err := flushEvent(); err != nil {
+				return err
 			}
-		} else if flusher != nil {
-			flusher.Flush()
 		}
 		if terminal && line == "" {
 			if failed {
@@ -1442,6 +1574,11 @@ func streamCopyWithUsage(w http.ResponseWriter, src io.Reader, onUsage func(in, 
 			}
 			return nil
 		}
+	}
+	// Trailing event without a blank-line terminator (truncated, or a provider
+	// that omits it) must still reach the client.
+	if err := flushEvent(); err != nil {
+		return err
 	}
 	if err := scanner.Err(); err != nil {
 		return err

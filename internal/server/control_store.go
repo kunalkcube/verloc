@@ -460,6 +460,31 @@ func (s *ControlStore) LoadOrImportConfig(seed *Config) (*Config, error) {
 	if err != nil {
 		return nil, err
 	}
+	// Validate with the exact function the server runs at boot (resolveBackends)
+	// BEFORE committing, so a configuration boot would reject can never become
+	// authoritative in control.db. prepareControlConfig — the only validator on
+	// the import path — never checked api_format, so an imported bootstrap (or a
+	// restored backup) carrying e.g. "api_format":"bogus" was committed with
+	// imported=1 and then made NewServer's resolveBackends fail on this and
+	// every later boot: a bricked gateway with no pointer to the cause. Running
+	// the same check the boot path runs means the two can never drift apart, and
+	// validating before Commit means a bad import rolls back (retryable) instead
+	// of being persisted, while an already-imported DB reports a clear error
+	// here rather than a bare log.Fatalf in NewServer.
+	backends, err := out.resolveBackends()
+	for _, b := range backends {
+		if b != nil && b.client != nil {
+			// A freshly built client has no open connections, so this is a
+			// cheap no-op — but it guarantees the throwaway transports cannot
+			// hold idle sockets if resolveBackends ever warms them. The
+			// returned backends are discarded; this is validation only and the
+			// signature is unchanged because other files call resolveBackends.
+			b.client.CloseIdleConnections()
+		}
+	}
+	if err != nil {
+		return nil, fmt.Errorf("management configuration is invalid: %w", err)
+	}
 	if err := tx.Commit(); err != nil {
 		return nil, err
 	}

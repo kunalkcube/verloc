@@ -11,6 +11,7 @@ type KeyState struct {
 	ID            string
 	Key           string
 	AccountID     string       // optional; substituted into base_url (%ACCOUNT%)
+	masked        string       // precomputed maskKey(Key); immutable, safe to read concurrently
 	cooldownUntil atomic.Int64 // unix nano; 0 = healthy
 	failCount     atomic.Int32
 	requests      atomic.Uint64
@@ -49,7 +50,7 @@ type KeyPool struct {
 func NewKeyPool(keys []KeyEntry, cooldown time.Duration) *KeyPool {
 	states := make([]*KeyState, len(keys))
 	for i, k := range keys {
-		states[i] = &KeyState{ID: k.ID, Key: k.Key, AccountID: k.AccountID}
+		states[i] = &KeyState{ID: k.ID, Key: k.Key, AccountID: k.AccountID, masked: maskKey(k.Key)}
 	}
 	return &KeyPool{states: states, cooldown: cooldown}
 }
@@ -111,14 +112,14 @@ func (p *KeyPool) MarkFailure(s *KeyState, override time.Duration) {
 		d = time.Hour
 	}
 	s.cooldownUntil.Store(time.Now().Add(d).UnixNano())
-	p.emit(maskKey(s.Key), "cooldown", 0, d.String())
+	p.emit(s.masked, "cooldown", 0, d.String())
 }
 
 func (p *KeyPool) MarkSuccess(s *KeyState) {
 	if s.failCount.Load() > 0 {
 		s.failCount.Store(0)
 		s.cooldownUntil.Store(0)
-		p.emit(maskKey(s.Key), "recover", 0, "")
+		p.emit(s.masked, "recover", 0, "")
 	} else {
 		s.failCount.Store(0)
 		s.cooldownUntil.Store(0)
@@ -159,6 +160,12 @@ func (p *KeyPool) RecordFailover(s *KeyState) {
 func (p *KeyPool) Count() int { return len(p.states) }
 
 // Stats returns a snapshot for health/debug endpoints.
+//
+// The returned slice is owned by the caller: it is retained by Snapshot's
+// output map, and concurrent Snapshot calls (two dashboard polls, or a poll
+// plus the ticker) would alias a shared buffer. Only the per-entry masked key
+// is cached on the state, which removes the repeated maskKey work without
+// handing out shared memory.
 func (p *KeyPool) Stats() []KeyStat {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -167,7 +174,7 @@ func (p *KeyPool) Stats() []KeyStat {
 	for _, s := range p.states {
 		until := s.cooldownUntil.Load()
 		out = append(out, KeyStat{
-			Key:         maskKey(s.Key),
+			Key:         s.masked,
 			Healthy:     until <= now,
 			FailCount:   s.failCount.Load(),
 			CooldownSec: max(0, (until-now)/int64(time.Second)),

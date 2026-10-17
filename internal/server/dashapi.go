@@ -52,12 +52,11 @@ type Ticker struct {
 	done     chan struct{}
 	stopOnce sync.Once
 	runOnce  sync.Once
-	initial  map[string]any
 	lastTS   int64
 }
 
 func NewTicker(srv *Server) *Ticker {
-	t := &Ticker{srv: srv, stop: make(chan struct{}), done: make(chan struct{}), initial: srv.metrics.Snapshot(srv.runtime().backends)}
+	t := &Ticker{srv: srv, stop: make(chan struct{}), done: make(chan struct{})}
 	if srv.store != nil {
 		_, t.lastTS, _ = srv.store.Range()
 	}
@@ -106,17 +105,17 @@ func (t *Ticker) Run() {
 
 func (t *Ticker) run() {
 	defer close(t.done)
-	prev := t.initial
 	lastTick := time.Now()
 	flush := func() {
-		rt := t.srv.runtime()
-		cur := t.srv.metrics.Snapshot(rt.backends)
-		d := computeDelta(prev, cur)
+		// Drained typed deltas replace (Snapshot, Snapshot, computeDelta): the
+		// ticker used to build two full map[string]any trees per tick purely to
+		// subtract cumulative counters, allocating ~172 KB twice every 3s.
+		dd := t.srv.metrics.DrainDelta()
+		d := deltaFromTick(dd)
 		if d.TS <= t.lastTS {
 			d.TS = t.lastTS + 1
 		}
 		t.lastTS = d.TS
-		prev = cur
 		d.MS = time.Since(lastTick).Milliseconds()
 		lastTick = time.Now()
 		if d.MS < 1 {
@@ -176,6 +175,34 @@ func scopeTicks(d Delta) (models, backends map[string]tickAgg) {
 		backends[k] = tickAgg{Req: v.Requests, Err: v.Err, TokIn: v.TokIn, TokOut: v.TokOut, TokCache: v.TokCache, Cost: v.Cost}
 	}
 	return
+}
+
+// deltaFromTick converts a drained TickDelta into the persisted Delta shape.
+// Field-for-field equivalent to the old snapshot differencing, without the
+// allocation of two Snapshots per tick.
+func deltaFromTick(td TickDelta) Delta {
+	d := Delta{TS: nowMs(), Models: map[string]deltaModel{}, Backends: map[string]deltaBackend{}}
+	d.Requests = int64(td.Total.Req)
+	d.Err = int64(td.Total.Err)
+	d.Failover = int64(td.Total.Failover)
+	d.TokIn = int64(td.Total.TokIn)
+	d.TokOut = int64(td.Total.TokOut)
+	d.TokCache = int64(td.Total.TokCache)
+	d.Cost = td.Total.Cost
+	d.MS = 3000
+	for k, v := range td.Models {
+		d.Models[k] = deltaModel{
+			Requests: int64(v.Req), TokIn: int64(v.TokIn),
+			TokOut: int64(v.TokOut), TokCache: int64(v.TokCache), Cost: v.Cost,
+		}
+	}
+	for k, v := range td.Backends {
+		d.Backends[k] = deltaBackend{
+			Requests: int64(v.Req), Err: int64(v.Err), TokIn: int64(v.TokIn),
+			TokOut: int64(v.TokOut), TokCache: int64(v.TokCache), Cost: v.Cost,
+		}
+	}
+	return d
 }
 
 // computeDelta diffs two cumulative /metrics snapshots into a per-tick Delta.

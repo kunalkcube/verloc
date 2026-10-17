@@ -29,6 +29,16 @@ type metricSet struct {
 	hist     [len(latBuckets) + 1]atomic.Uint64
 	mu       sync.Mutex
 	status   map[int]uint64
+	// Delta counters, drained by DrainDelta for the 3s ticker. The ticker
+	// diffs cumulative counters today, which forces a full Snapshot (with its
+	// map-of-any allocations) twice per tick just to subtract numbers.
+	dReq      atomic.Uint64
+	dErr      atomic.Uint64
+	dFailover atomic.Uint64
+	dTokIn    atomic.Uint64
+	dTokOut   atomic.Uint64
+	dTokCache atomic.Uint64
+	dCostBits atomic.Uint64
 }
 
 func newMetricSet() *metricSet { return &metricSet{status: map[int]uint64{}} }
@@ -47,27 +57,106 @@ func (m *metricSet) addCost(c float64) {
 
 func (m *metricSet) cost() float64 { return math.Float64frombits(m.costBits.Load()) }
 
+func (m *metricSet) addDeltaCost(c float64) {
+	if c <= 0 {
+		return
+	}
+	for {
+		old := m.dCostBits.Load()
+		if m.dCostBits.CompareAndSwap(old, math.Float64bits(math.Float64frombits(old)+c)) {
+			return
+		}
+	}
+}
+
+// drainDelta reads and resets the per-tick counters. Reset is not atomic with
+// the read, so a concurrent Add may land either side of the boundary; that is
+// acceptable for a 3s tick (the value appears in one tick or the next, never
+// lost) and avoids serializing the request path behind a mutex.
+func (m *metricSet) drainDelta() setDelta {
+	d := setDelta{
+		Req: m.dReq.Swap(0), Err: m.dErr.Swap(0), Failover: m.dFailover.Swap(0),
+		TokIn: m.dTokIn.Swap(0), TokOut: m.dTokOut.Swap(0), TokCache: m.dTokCache.Swap(0),
+		Cost: math.Float64frombits(m.dCostBits.Swap(0)),
+	}
+	return d
+}
+
+// setDelta is one tick of activity for a model or backend. Typed on purpose:
+// the ticker path must not build map[string]any trees per tick.
+type setDelta struct {
+	Req, Err, Failover, TokIn, TokOut, TokCache uint64
+	Cost                                        float64
+}
+
+// TickDelta is the drained activity for the whole gateway since the last
+// drain, split by model and backend.
+type TickDelta struct {
+	Total    setDelta
+	Models   map[string]setDelta
+	Backends map[string]setDelta
+}
+
+// DrainDelta returns activity accumulated since the previous call. It replaces
+// (Snapshot, Snapshot, computeDelta) on the ticker path: no map-of-any, no
+// per-set status/histogram copies, no JSON-typed intermediate.
+func (mt *Metrics) DrainDelta() TickDelta {
+	mt.mu.Lock()
+	models := make(map[string]setDelta, len(mt.models))
+	backends := make(map[string]setDelta, len(mt.backends))
+	for k, v := range mt.models {
+		d := v.drainDelta()
+		if d.Req > 0 || d.TokIn > 0 || d.TokOut > 0 || d.Err > 0 || d.Cost > 0 || d.Failover > 0 {
+			models[k] = d
+		}
+	}
+	for k, v := range mt.backends {
+		d := v.drainDelta()
+		if d.Req > 0 || d.TokIn > 0 || d.TokOut > 0 || d.Err > 0 || d.Cost > 0 || d.Failover > 0 {
+			backends[k] = d
+		}
+	}
+	mt.mu.Unlock()
+
+	out := TickDelta{Models: models, Backends: backends}
+	for _, d := range models {
+		out.Total.Req += d.Req
+		out.Total.Err += d.Err
+		out.Total.Failover += d.Failover
+		out.Total.TokIn += d.TokIn
+		out.Total.TokOut += d.TokOut
+		out.Total.TokCache += d.TokCache
+		out.Total.Cost += d.Cost
+	}
+	return out
+}
+
 func (m *metricSet) add(reqs, okc, errc uint64, stream bool, tin, tout, tcache, latNs, ttftNs uint64, failover bool, status int) {
 	if reqs > 0 {
 		m.requests.Add(reqs)
+		m.dReq.Add(reqs)
 	}
 	if okc > 0 {
 		m.ok.Add(okc)
 	}
 	if errc > 0 {
 		m.err.Add(errc)
+		m.dErr.Add(errc)
 	}
 	if stream {
 		m.stream.Add(1)
 	}
 	if tin > 0 {
 		m.tokIn.Add(tin)
+		m.dTokIn.Add(tin)
 	}
 	if tout > 0 {
 		m.tokOut.Add(tout)
+		m.dTokOut.Add(tout)
 	}
 	if tcache > 0 {
 		m.tokCache.Add(tcache)
+		m.dTokCache.Add(tcache)
 	}
 	if latNs > 0 {
 		m.latSumNs.Add(latNs)
@@ -79,6 +168,7 @@ func (m *metricSet) add(reqs, okc, errc uint64, stream bool, tin, tout, tcache, 
 	}
 	if failover {
 		m.failover.Add(1)
+		m.dFailover.Add(1)
 	}
 	if status > 0 {
 		m.mu.Lock()
@@ -228,6 +318,8 @@ func (mt *Metrics) record(model, backend string, stream bool, status int, tin, t
 	if cost > 0 && !math.IsInf(cost, 0) {
 		m.addCost(cost)
 		b.addCost(cost)
+		m.addDeltaCost(cost)
+		b.addDeltaCost(cost)
 	}
 	latMs := float64(latNs) / 1e6
 	mt.pushRecent(latMs)

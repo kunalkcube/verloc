@@ -1,0 +1,22 @@
+name: ci
+on:
+  push:
+    branches: [master, main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.25'
+      - name: vet
+        run: go vet ./...
+      - name: test (race)
+        run: go test -race ./... -count=1
+      - name: build (CGO off — the shipping configuration)
+        run: CGO_ENABLED=0 go build -trimpath -o /tmp/verloc ./cmd/verloc
+      - name: benchmarks compile and run (smoke)
+        run: go test ./internal/server/ -short -run='^$' -bench='EndToEndStream100KB' -benchtime=10x -count=1

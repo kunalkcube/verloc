@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"math"
 	"net/url"
 	"os"
@@ -33,21 +34,23 @@ import (
 // a failure event per attempt, agents retry in a storm, and every request
 // serialized on SQLite behind the ticker and dashboard reads.
 type Store struct {
-	db          *sql.DB
-	mu          sync.Mutex
-	queueMu     sync.RWMutex
-	requestCh   chan ReqRecord
-	keyEvCh     chan keyEventReq
-	flushCh     chan chan error
-	done        chan struct{}
-	closed      bool
-	closeOnce   sync.Once
-	closeErr    error
-	keyEvDrop   atomic.Uint64
-	requestDrop atomic.Uint64
-	writeErrors atomic.Uint64
-	lastWrite   atomic.Int64
-	queued      atomic.Int64
+	db           *sql.DB
+	mu           sync.Mutex
+	queueMu      sync.RWMutex
+	requestCh    chan ReqRecord
+	keyEvCh      chan keyEventReq
+	flushCh      chan chan error
+	done         chan struct{}
+	closed       bool
+	closeOnce    sync.Once
+	closeErr     error
+	keyEvDrop    atomic.Uint64
+	requestDrop  atomic.Uint64
+	summaryMu    sync.Mutex
+	summaryCache map[string]summaryCacheEntry
+	writeErrors  atomic.Uint64
+	lastWrite    atomic.Int64
+	queued       atomic.Int64
 }
 
 type keyEventReq struct {
@@ -112,6 +115,18 @@ func (s *Store) migrate() error {
 		`CREATE INDEX IF NOT EXISTS idx_requests_model ON requests(model,ts)`,
 		`CREATE INDEX IF NOT EXISTS idx_requests_backend ON requests(backend,ts)`,
 		`CREATE INDEX IF NOT EXISTS idx_requests_client ON requests(client_key_id,ts)`,
+		// Leading-ts indexes for the dominant analytics predicate. The
+		// dashboard reads one column per matching row (`SELECT record`), and
+		// the existing (col,ts) indexes do not cover it, so the planner
+		// abandoned them for a full `SCAN requests` — 1.15s over 200k rows.
+		// The time window (`ts>=?`) is always present and is a range, so ts
+		// must lead; the secondary column filters within the scanned range.
+		// These are additive and idempotent on every boot; they cost disk and
+		// insert time, an accepted tradeoff since history is never pruned.
+		`CREATE INDEX IF NOT EXISTS idx_requests_ts_model ON requests(ts, model)`,
+		`CREATE INDEX IF NOT EXISTS idx_requests_ts_backend ON requests(ts, backend)`,
+		`CREATE INDEX IF NOT EXISTS idx_requests_ts_client ON requests(ts, client_key_id)`,
+		`CREATE INDEX IF NOT EXISTS idx_requests_ts_status_ok ON requests(ts, status, ok)`,
 		`CREATE TABLE IF NOT EXISTS request_hourly (
 		 hour INTEGER NOT NULL, model TEXT NOT NULL, upstream TEXT NOT NULL, backend TEXT NOT NULL,
 		 client_key_id TEXT NOT NULL, client_name TEXT NOT NULL, status INTEGER NOT NULL, ok INTEGER NOT NULL,
@@ -135,6 +150,31 @@ func (s *Store) migrate() error {
 		   d_backends   TEXT    NOT NULL DEFAULT '{}'
 		 );`,
 		`CREATE INDEX IF NOT EXISTS idx_snap_ts ON snapshots(ts);`,
+		// Derived caches. `requests` and `snapshots` stay the immutable detail
+		// authority; these tables only take work OFF THE READ PATH by letting a
+		// 30-day chart aggregate minutes instead of re-reading ~864k raw ticks
+		// (measured 7.5s and 892MB per poll). They are additive-only and never
+		// used to double-count detail: for a window that predates their earliest
+		// row, the reader transparently falls back to raw ticks.
+		`CREATE TABLE IF NOT EXISTS snapshot_minute (
+		   minute INTEGER PRIMARY KEY,
+		   requests INTEGER NOT NULL, err INTEGER NOT NULL,
+		   tok_in INTEGER NOT NULL, tok_out INTEGER NOT NULL, tok_cache INTEGER NOT NULL,
+		   cost REAL NOT NULL, ms INTEGER NOT NULL,
+		   lat_w REAL NOT NULL, lat_sum REAL NOT NULL, ttft_w REAL NOT NULL, ttft_sum REAL NOT NULL,
+		   hist TEXT NOT NULL, ttft_hist TEXT NOT NULL,
+		   hist_n INTEGER NOT NULL DEFAULT 0, missing_n INTEGER NOT NULL DEFAULT 0,
+		   models TEXT NOT NULL, backends TEXT NOT NULL
+		 )`,
+		`CREATE TABLE IF NOT EXISTS analytics_totals (
+		   id INTEGER PRIMARY KEY CHECK (id=1),
+		   cost REAL NOT NULL, requests INTEGER NOT NULL,
+		   tok_in INTEGER NOT NULL, tok_out INTEGER NOT NULL, tok_cache INTEGER NOT NULL,
+		   err INTEGER NOT NULL,
+		   oldest_ts INTEGER NOT NULL, newest_ts INTEGER NOT NULL, ticks INTEGER NOT NULL
+		 )`,
+		`INSERT OR IGNORE INTO analytics_totals(id,cost,requests,tok_in,tok_out,tok_cache,err,oldest_ts,newest_ts,ticks)
+		   VALUES(1,0,0,0,0,0,0,0,0,0)`,
 		`CREATE TABLE IF NOT EXISTS alerts (
 		   id         INTEGER PRIMARY KEY AUTOINCREMENT,
 		   ts         INTEGER NOT NULL,
@@ -186,7 +226,25 @@ func (s *Store) migrate() error {
 	if _, err = tx.Exec(`UPDATE key_events SET key='',msg='' WHERE key!='' OR msg!=''`); err != nil {
 		return err
 	}
-	return tx.Commit()
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	// Refresh planner statistics for the new ts-leading indexes. Two guards
+	// keep this cheap and safe:
+	//   * analysis_limit caps how many rows ANALYZE samples per index, so it
+	//     can never become a full-table ANALYZE on a large (200k+ row) DB;
+	//   * PRAGMA optimize only analyzes tables whose stats are missing or
+	//     stale for queries this connection has run, so on a settled database
+	//     it is effectively a no-op rather than a boot-time full re-analyze.
+	// Both run best-effort on one dedicated connection (pragmas are
+	// per-connection) and never fail startup — stale stats slow queries, they
+	// do not corrupt anything.
+	if conn, cerr := s.db.Conn(context.Background()); cerr == nil {
+		_, _ = conn.ExecContext(context.Background(), `PRAGMA analysis_limit=1000`)
+		_, _ = conn.ExecContext(context.Background(), `PRAGMA optimize`)
+		_ = conn.Close()
+	}
+	return nil
 }
 
 // Delta is one 3s tick of aggregate activity, matching the legacy
@@ -249,12 +307,362 @@ func (s *Store) InsertDelta(d *Delta) error {
 	if err != nil {
 		return err
 	}
-	_, err = s.db.Exec(
+	// One transaction: the tick row, the running totals, and the minute rollup
+	// must not disagree. LifetimeTotals previously SUMmed all of snapshots on
+	// every dashboard poll (250ms at 1M ticks, holding s.mu so it blocked this
+	// very writer for 241ms) — the totals row is the fix.
+	tx, err := s.db.Begin()
+	if err != nil {
+		s.noteWrite(err)
+		return err
+	}
+	defer tx.Rollback()
+
+	if _, err = tx.Exec(
 		`INSERT INTO snapshots
 		   (ts, payload, d_requests, d_tok_in, d_tok_out, d_tok_cache, d_cost, d_ms, d_err, d_models, d_backends)
 		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		d.TS, d.Payload, d.Requests, d.TokIn, d.TokOut, d.TokCache, d.Cost, d.MS, d.Err, string(mj), string(bj))
+		d.TS, d.Payload, d.Requests, d.TokIn, d.TokOut, d.TokCache, d.Cost, d.MS, d.Err, string(mj), string(bj)); err != nil {
+		s.noteWrite(err)
+		return err
+	}
+	if _, err = tx.Exec(
+		`UPDATE analytics_totals SET
+		   cost=cost+?, requests=requests+?, tok_in=tok_in+?, tok_out=tok_out+?, tok_cache=tok_cache+?, err=err+?,
+		   oldest_ts=CASE WHEN oldest_ts=0 OR ?<oldest_ts THEN ? ELSE oldest_ts END,
+		   newest_ts=CASE WHEN ? > newest_ts THEN ? ELSE newest_ts END,
+		   ticks=ticks+1
+		 WHERE id=1`,
+		d.Cost, d.Requests, d.TokIn, d.TokOut, d.TokCache, d.Err,
+		d.TS, d.TS, d.TS, d.TS); err != nil {
+		s.noteWrite(err)
+		return err
+	}
+	if err = s.rollMinute(tx, d); err != nil {
+		s.noteWrite(err)
+		return err
+	}
+	err = tx.Commit()
 	s.noteWrite(err)
+	return err
+}
+
+// minuteAcc accumulates one minute of ticks. Both the live per-tick rollup and
+// the one-time backfill fold through this type, so the two paths cannot drift.
+type minuteAcc struct {
+	req, errN, tin, tout, tcache, ms int64
+	cost                             float64
+	latW, latSum, ttftW, ttftSum     float64
+	hist, ttftHist                   [len(latBuckets) + 1]uint64
+	histN, missingN                  int64
+	models                           map[string]deltaModel
+	backends                         map[string]deltaBackend
+}
+
+func newMinuteAcc() *minuteAcc {
+	return &minuteAcc{models: map[string]deltaModel{}, backends: map[string]deltaBackend{}}
+}
+
+// addDelta folds one tick. A tick that carried traffic but no usable histogram
+// marks the minute unavailable: snapshot percentiles are averages over the tick
+// and must never be folded into a window distribution, matching the raw path.
+func (a *minuteAcc) addDelta(d *Delta) {
+	a.req += d.Requests
+	a.errN += d.Err
+	a.tin += d.TokIn
+	a.tout += d.TokOut
+	a.tcache += d.TokCache
+	a.cost += d.Cost
+	a.ms += d.MS
+	if d.Requests > 0 {
+		usable := false
+		if d.Payload != "" {
+			var st TickStats
+			if json.Unmarshal([]byte(d.Payload), &st) == nil {
+				a.latW += float64(d.Requests)
+				a.latSum += st.Avg * float64(d.Requests)
+				a.ttftW += float64(st.TTFTN)
+				a.ttftSum += st.TTFT * float64(st.TTFTN)
+				if len(st.LatHist) == len(latBuckets)+1 {
+					for i, v := range st.LatHist {
+						a.hist[i] += v
+					}
+					usable = true
+				}
+			}
+		}
+		if usable {
+			a.histN++
+		} else {
+			a.missingN++
+		}
+	}
+	for k, v := range d.Models {
+		g := a.models[k]
+		g.Requests += v.Requests
+		g.TokIn += v.TokIn
+		g.TokOut += v.TokOut
+		g.TokCache += v.TokCache
+		g.Cost += v.Cost
+		a.models[k] = g
+	}
+	for k, v := range d.Backends {
+		g := a.backends[k]
+		g.Requests += v.Requests
+		g.TokIn += v.TokIn
+		g.TokOut += v.TokOut
+		g.TokCache += v.TokCache
+		g.Err += v.Err
+		g.Cost += v.Cost
+		a.backends[k] = g
+	}
+}
+
+func (a *minuteAcc) write(tx *sql.Tx, minute int64) error {
+	hj, _ := json.Marshal(a.hist[:])
+	thj, _ := json.Marshal(a.ttftHist[:])
+	mj, _ := json.Marshal(a.models)
+	bj, _ := json.Marshal(a.backends)
+	_, err := tx.Exec(`INSERT INTO snapshot_minute
+	   (minute,requests,err,tok_in,tok_out,tok_cache,cost,ms,lat_w,lat_sum,ttft_w,ttft_sum,hist,ttft_hist,models,backends,hist_n,missing_n)
+	   VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+	   ON CONFLICT(minute) DO UPDATE SET
+	     requests=excluded.requests, err=excluded.err, tok_in=excluded.tok_in, tok_out=excluded.tok_out,
+	     tok_cache=excluded.tok_cache, cost=excluded.cost, ms=excluded.ms,
+	     lat_w=excluded.lat_w, lat_sum=excluded.lat_sum, ttft_w=excluded.ttft_w, ttft_sum=excluded.ttft_sum,
+	     hist=excluded.hist, ttft_hist=excluded.ttft_hist, models=excluded.models, backends=excluded.backends,
+	     hist_n=excluded.hist_n, missing_n=excluded.missing_n`,
+		minute, a.req, a.errN, a.tin, a.tout, a.tcache, a.cost, a.ms,
+		a.latW, a.latSum, a.ttftW, a.ttftSum, string(hj), string(thj), string(mj), string(bj),
+		a.histN, a.missingN)
+	return err
+}
+
+// RebuildRollups rebuilds snapshot_minute from the raw tick table. This is the
+// migration for history that predates the rollup (and the repair path if the
+// rollup is ever lost). It streams ticks in time order and writes once per
+// minute, so it is O(minutes) writes rather than one read-merge-write per tick.
+func (s *Store) RebuildRollups(ctx context.Context) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	rows, err := s.db.QueryContext(ctx, `SELECT ts,payload,d_requests,d_tok_in,d_tok_out,d_tok_cache,d_cost,d_ms,d_err,d_models,d_backends
+	                                     FROM snapshots ORDER BY ts ASC`)
+	if err != nil {
+		return 0, err
+	}
+	defer rows.Close()
+
+	tx, err := s.db.Begin()
+	if err != nil {
+		return 0, err
+	}
+	defer tx.Rollback()
+	if _, err = tx.Exec(`DELETE FROM snapshot_minute`); err != nil {
+		return 0, err
+	}
+
+	var (
+		curMinute int64 = -1
+		acc             = newMinuteAcc()
+		written   int
+	)
+	flush := func() error {
+		if curMinute < 0 {
+			return nil
+		}
+		if err := acc.write(tx, curMinute); err != nil {
+			return err
+		}
+		written++
+		acc = newMinuteAcc()
+		return nil
+	}
+	for rows.Next() {
+		if err := ctx.Err(); err != nil {
+			return 0, err
+		}
+		var d Delta
+		var payload, mj, bj string
+		if err := rows.Scan(&d.TS, &payload, &d.Requests, &d.TokIn, &d.TokOut, &d.TokCache,
+			&d.Cost, &d.MS, &d.Err, &mj, &bj); err != nil {
+			return 0, err
+		}
+		d.Payload = payload
+		_ = json.Unmarshal([]byte(mj), &d.Models)
+		_ = json.Unmarshal([]byte(bj), &d.Backends)
+		if d.Models == nil {
+			d.Models = map[string]deltaModel{}
+		}
+		if d.Backends == nil {
+			d.Backends = map[string]deltaBackend{}
+		}
+		minute := d.TS / 60000 * 60000
+		if minute != curMinute {
+			if err := flush(); err != nil {
+				return 0, err
+			}
+			curMinute = minute
+		}
+		acc.addDelta(&d)
+	}
+	if err := rows.Err(); err != nil {
+		return 0, err
+	}
+	if err := flush(); err != nil {
+		return 0, err
+	}
+	if err := tx.Commit(); err != nil {
+		return 0, err
+	}
+	return written, nil
+}
+
+// EnsureRollupsBackfilled rebuilds the minute rollup when the analytics store
+// has raw ticks but no rollup (i.e. history that predates it). Runs in the
+// background so startup is never blocked by a large rebuild.
+func (s *Store) EnsureRollupsBackfilled(ctx context.Context) {
+	s.mu.Lock()
+	var minutes, ticks int64
+	_ = s.db.QueryRow(`SELECT COUNT(*) FROM snapshot_minute`).Scan(&minutes)
+	_ = s.db.QueryRow(`SELECT COUNT(*) FROM snapshots`).Scan(&ticks)
+	s.mu.Unlock()
+	if minutes > 0 || ticks == 0 {
+		return
+	}
+	go func() {
+		start := time.Now()
+		n, err := s.RebuildRollups(ctx)
+		if err != nil {
+			log.Printf("[analytics] rollup backfill failed: %v", err)
+			return
+		}
+		log.Printf("[analytics] rollup backfill complete: %d minutes in %v", n, time.Since(start).Round(time.Millisecond))
+	}()
+}
+
+// rollMinute folds one tick into its minute bucket. Guarded by the caller's
+// transaction; the histogram and dimension maps are merged in Go because the
+// dimension fold was measured to be ~2.8x slower in SQL (json_each over ~1M
+// ticks produces millions of intermediate rows) and the per-minute merge is
+// O(1) here instead of a scan later.
+func (s *Store) rollMinute(tx *sql.Tx, d *Delta) error {
+	minute := d.TS / 60000 * 60000
+	var (
+		latW, latSum, ttftW, ttftSum float64
+		hist, ttftHist               [len(latBuckets) + 1]uint64
+		models, backends             = map[string]deltaModel{}, map[string]deltaBackend{}
+	)
+	// A tick that carried traffic but no usable histogram must mark its bucket
+	// unavailable: snapshot percentiles are not averages and cannot be folded
+	// into a window distribution (mirrors seriesBuckets' `missing` tracking).
+	var histN, missingN int64
+	if d.Requests > 0 {
+		usable := false
+		if d.Payload != "" {
+			var st TickStats
+			if json.Unmarshal([]byte(d.Payload), &st) == nil {
+				latW = float64(d.Requests)
+				latSum = st.Avg * float64(d.Requests)
+				ttftW = float64(st.TTFTN)
+				ttftSum = st.TTFT * float64(st.TTFTN)
+				if len(st.LatHist) == len(latBuckets)+1 {
+					copy(hist[:], st.LatHist)
+					usable = true
+				}
+			}
+		}
+		if usable {
+			histN = 1
+		} else {
+			missingN = 1
+		}
+	}
+	for k, v := range d.Models {
+		models[k] = v
+	}
+	for k, v := range d.Backends {
+		backends[k] = v
+	}
+
+	// Read the existing bucket, merge, write back in the same transaction.
+	var (
+		pReq, pErr, pIn, pOut, pCache, pMS int64
+		pCost                              float64
+		pLatW, pLatSum, pTTFTW, pTTFTSum   float64
+		pHist, pTTFTHist, pModels, pBack   string
+		pHistN, pMissingN                  int64
+	)
+	err := tx.QueryRow(`SELECT requests,err,tok_in,tok_out,tok_cache,cost,ms,lat_w,lat_sum,ttft_w,ttft_sum,hist,ttft_hist,models,backends,hist_n,missing_n
+	                    FROM snapshot_minute WHERE minute=?`, minute).Scan(
+		&pReq, &pErr, &pIn, &pOut, &pCache, &pCost, &pMS, &pLatW, &pLatSum, &pTTFTW, &pTTFTSum,
+		&pHist, &pTTFTHist, &pModels, &pBack, &pHistN, &pMissingN)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return err
+	}
+	if err == nil {
+		var h, th [len(latBuckets) + 1]uint64
+		var mm map[string]deltaModel
+		var bb map[string]deltaBackend
+		_ = json.Unmarshal([]byte(pHist), &h)
+		_ = json.Unmarshal([]byte(pTTFTHist), &th)
+		_ = json.Unmarshal([]byte(pModels), &mm)
+		_ = json.Unmarshal([]byte(pBack), &bb)
+		for i := range hist {
+			hist[i] += h[i]
+			ttftHist[i] += th[i]
+		}
+		for k, v := range mm {
+			g := models[k]
+			g.Requests += v.Requests
+			g.TokIn += v.TokIn
+			g.TokOut += v.TokOut
+			g.TokCache += v.TokCache
+			g.Cost += v.Cost
+			models[k] = g
+		}
+		for k, v := range bb {
+			g := backends[k]
+			g.Requests += v.Requests
+			g.TokIn += v.TokIn
+			g.TokOut += v.TokOut
+			g.TokCache += v.TokCache
+			g.Err += v.Err
+			g.Cost += v.Cost
+			backends[k] = g
+		}
+		latW += pLatW
+		latSum += pLatSum
+		ttftW += pTTFTW
+		ttftSum += pTTFTSum
+		pReq += d.Requests
+		pErr += d.Err
+		pIn += d.TokIn
+		pOut += d.TokOut
+		pCache += d.TokCache
+		pCost += d.Cost
+		pMS += d.MS
+		histN += pHistN
+		missingN += pMissingN
+	} else {
+		pReq, pErr, pIn, pOut, pCache, pMS = d.Requests, d.Err, d.TokIn, d.TokOut, d.TokCache, d.MS
+		pCost = d.Cost
+	}
+
+	hj, _ := json.Marshal(hist[:])
+	thj, _ := json.Marshal(ttftHist[:])
+	mj, _ := json.Marshal(models)
+	bj, _ := json.Marshal(backends)
+	_, err = tx.Exec(`INSERT INTO snapshot_minute
+	   (minute,requests,err,tok_in,tok_out,tok_cache,cost,ms,lat_w,lat_sum,ttft_w,ttft_sum,hist,ttft_hist,models,backends,hist_n,missing_n)
+	   VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+	   ON CONFLICT(minute) DO UPDATE SET
+	     requests=excluded.requests, err=excluded.err, tok_in=excluded.tok_in, tok_out=excluded.tok_out,
+	     tok_cache=excluded.tok_cache, cost=excluded.cost, ms=excluded.ms,
+	     lat_w=excluded.lat_w, lat_sum=excluded.lat_sum, ttft_w=excluded.ttft_w, ttft_sum=excluded.ttft_sum,
+	     hist=excluded.hist, ttft_hist=excluded.ttft_hist, models=excluded.models, backends=excluded.backends,
+	     hist_n=excluded.hist_n, missing_n=excluded.missing_n`,
+		minute, pReq, pErr, pIn, pOut, pCache, pCost, pMS, latW, latSum, ttftW, ttftSum,
+		string(hj), string(thj), string(mj), string(bj), histN, missingN)
 	return err
 }
 
@@ -326,6 +734,14 @@ func (s *Store) SeriesSince(ctx context.Context, sinceMs int64, maxPoints int) (
 	if n <= maxPoints {
 		return s.seriesScan(ctx, sinceMs)
 	}
+	// Prefer the minute rollup: re-reading every raw tick to produce 500 points
+	// cost 7.5s and 892MB at 1M ticks, and it re-read the whole table on every
+	// 10s poll. The rollup carries the same merged dimensions, latency
+	// histogram and TTFT accumulators, so the output is equivalent for any
+	// window it covers.
+	if rows, ok, err := s.seriesFromMinutes(ctx, sinceMs, minTs, maxPoints); ok {
+		return rows, err
+	}
 	return s.seriesBuckets(ctx, sinceMs, minTs, maxTs, maxPoints)
 }
 
@@ -372,6 +788,168 @@ func (s *Store) seriesScan(ctx context.Context, sinceMs int64) ([]SeriesRow, err
 		return []SeriesRow{}, nil
 	}
 	return all, nil
+}
+
+// seriesFromMinutes aggregates the minute rollup. ok is false when the window
+// is not fully covered by the rollup (history predating it, or the rollup has
+// not accumulated yet), in which case the caller falls back to raw ticks so no
+// window is ever silently empty.
+//
+// The rollup is bucketed in Go rather than with SQL GROUP BY on purpose: the
+// dimension maps and histograms are JSON columns, and a bare column under
+// GROUP BY yields an arbitrary row from each group (SQLite/MySQL semantics),
+// which silently dropped all but one minute's dimensions per bucket. Reading
+// minute rows is still ~20x fewer rows than reading raw ticks (20 ticks per
+// minute at the 3s cadence), which is where the win comes from.
+func (s *Store) seriesFromMinutes(ctx context.Context, sinceMs, oldestTick int64, maxPoints int) ([]SeriesRow, bool, error) {
+	var minutes, firstMinute, lastMinute int64
+	if err := s.db.QueryRowContext(ctx,
+		`SELECT COUNT(*), COALESCE(MIN(minute),0), COALESCE(MAX(minute),0) FROM snapshot_minute`).
+		Scan(&minutes, &firstMinute, &lastMinute); err != nil {
+		return nil, false, err
+	}
+	if minutes == 0 {
+		return nil, false, nil
+	}
+	// The rollup is only usable when it covers everything the window can see.
+	// Two ways that holds:
+	//   - the rollup starts at least as early as the oldest raw tick (it is
+	//     complete), or
+	//   - the window itself starts after the rollup's first minute, so any
+	//     uncovered older ticks are outside the window anyway.
+	// Using only the second condition made the common case (selecting a window
+	// wider than the retained history) fall back needlessly and stay slow.
+	rollupComplete := oldestTick == 0 || oldestTick >= firstMinute-60000
+	windowInsideRollup := sinceMs > 0 && sinceMs >= firstMinute-60000
+	if !rollupComplete && !windowInsideRollup {
+		return nil, false, nil
+	}
+	if maxPoints < 1 {
+		maxPoints = 500
+	}
+	bucketMs := int64(60000)
+	if minutes > int64(maxPoints) {
+		span := lastMinute - firstMinute
+		bucketMs = (span/int64(maxPoints)/60000 + 1) * 60000
+	}
+
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT minute, requests, tok_in, tok_out, tok_cache, cost, ms, err,
+		       lat_w, lat_sum, ttft_w, ttft_sum, hist, ttft_hist, models, backends, missing_n
+		FROM snapshot_minute
+		WHERE minute >= ?
+		ORDER BY minute ASC`, sinceMs)
+	if err != nil {
+		return nil, false, err
+	}
+	defer rows.Close()
+
+	type acc struct {
+		row                          SeriesRow
+		latW, latSum, ttftW, ttftSum float64
+		hist, ttftHist               [len(latBuckets) + 1]uint64
+		missingN                     int64
+		models                       map[string]deltaModel
+		backends                     map[string]deltaBackend
+	}
+	buckets := map[int64]*acc{}
+	var order []int64
+	for rows.Next() {
+		if err := ctx.Err(); err != nil {
+			return nil, false, err
+		}
+		var minute, req, tin, tout, tcache, ms, errN, missingN int64
+		var cost, latW, latSum, ttftW, ttftSum float64
+		var hj, thj, mj, bj string
+		if err = rows.Scan(&minute, &req, &tin, &tout, &tcache, &cost, &ms, &errN,
+			&latW, &latSum, &ttftW, &ttftSum, &hj, &thj, &mj, &bj, &missingN); err != nil {
+			return nil, false, err
+		}
+		idx := (minute - firstMinute) / bucketMs
+		a := buckets[idx]
+		if a == nil {
+			a = &acc{models: map[string]deltaModel{}, backends: map[string]deltaBackend{}}
+			buckets[idx] = a
+			order = append(order, idx)
+			a.row.TS = minute
+		}
+		a.row.Requests += req
+		a.row.TokIn += tin
+		a.row.TokOut += tout
+		a.row.TokCache += tcache
+		a.row.Cost += cost
+		a.row.MS += ms
+		a.row.Err += errN
+		a.latW += latW
+		a.latSum += latSum
+		a.ttftW += ttftW
+		a.ttftSum += ttftSum
+		a.missingN += missingN
+
+		var h, th [len(latBuckets) + 1]uint64
+		if json.Unmarshal([]byte(hj), &h) == nil {
+			for i, v := range h {
+				a.hist[i] += v
+			}
+		}
+		if json.Unmarshal([]byte(thj), &th) == nil {
+			for i, v := range th {
+				a.ttftHist[i] += v
+			}
+		}
+		var mm map[string]deltaModel
+		var bb map[string]deltaBackend
+		_ = json.Unmarshal([]byte(mj), &mm)
+		_ = json.Unmarshal([]byte(bj), &bb)
+		for k, v := range mm {
+			g := a.models[k]
+			g.Requests += v.Requests
+			g.TokIn += v.TokIn
+			g.TokOut += v.TokOut
+			g.TokCache += v.TokCache
+			g.Cost += v.Cost
+			a.models[k] = g
+		}
+		for k, v := range bb {
+			g := a.backends[k]
+			g.Requests += v.Requests
+			g.TokIn += v.TokIn
+			g.TokOut += v.TokOut
+			g.TokCache += v.TokCache
+			g.Err += v.Err
+			g.Cost += v.Cost
+			a.backends[k] = g
+		}
+	}
+	if err = rows.Err(); err != nil {
+		return nil, false, err
+	}
+	if len(order) == 0 {
+		return []SeriesRow{}, true, nil
+	}
+	// order is already ascending because rows are ordered by minute.
+	out := make([]SeriesRow, 0, len(order))
+	for _, idx := range order {
+		a := buckets[idx]
+		a.row.Models = a.models
+		a.row.Backends = a.backends
+		a.row.AggregateBucketMs = bucketMs
+		a.row.DistributionsUnavailable = a.missingN > 0
+		a.row.DistributionsApproximate = a.missingN == 0
+		if a.latW > 0 {
+			a.row.LatAvg = a.latSum / a.latW
+		}
+		if a.ttftW > 0 {
+			a.row.TTFTAvg = a.ttftSum / a.ttftW
+		}
+		if !a.row.DistributionsUnavailable {
+			a.row.LatP50 = histogramPercentile(a.hist, 50)
+			a.row.LatP95 = histogramPercentile(a.hist, 95)
+			a.row.LatP99 = histogramPercentile(a.hist, 99)
+		}
+		out = append(out, a.row)
+	}
+	return out, true, nil
 }
 
 // seriesBuckets aggregates a long window in SQL. Caller holds s.mu.
@@ -537,23 +1115,62 @@ type SeriesRow struct {
 	AggregateBucketMs        int64                   `json:"aggregate_bucket_ms,omitempty"`
 }
 
+// Range reports the retained snapshot window from the maintained totals row
+// instead of scanning every tick (MIN/MAX/COUNT over 1M rows cost 108ms and
+// grew forever on a table that gains a row every 3s).
 func (s *Store) Range() (oldest, newest int64, count int) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	row := s.db.QueryRow(`SELECT COALESCE(MIN(ts),0), COALESCE(MAX(ts),0), COUNT(*) FROM snapshots`)
+	row := s.db.QueryRow(`SELECT oldest_ts, newest_ts, ticks FROM analytics_totals WHERE id=1`)
 	_ = row.Scan(&oldest, &newest, &count)
 	return
 }
 
-// LifetimeTotals sums the retained window. This is the dashboard's
-// headline lifetime cost — it survives verloc restarts.
-func (s *Store) LifetimeTotals() (cost float64, requests, tokIn, tokOut, tokCache, errN int64) {
+// RebuildTotals recomputes the running totals from the raw tick table. The
+// maintained row is exact by construction (same transaction as the insert),
+// so this is a repair/verification path — not something the request path runs.
+// Use it after a manual import, or in tests asserting the invariant holds.
+func (s *Store) RebuildTotals() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	_, err := s.db.Exec(`UPDATE analytics_totals SET
+	   cost=(SELECT COALESCE(SUM(d_cost),0) FROM snapshots),
+	   requests=(SELECT COALESCE(SUM(d_requests),0) FROM snapshots),
+	   tok_in=(SELECT COALESCE(SUM(d_tok_in),0) FROM snapshots),
+	   tok_out=(SELECT COALESCE(SUM(d_tok_out),0) FROM snapshots),
+	   tok_cache=(SELECT COALESCE(SUM(d_tok_cache),0) FROM snapshots),
+	   err=(SELECT COALESCE(SUM(d_err),0) FROM snapshots),
+	   oldest_ts=(SELECT COALESCE(MIN(ts),0) FROM snapshots),
+	   newest_ts=(SELECT COALESCE(MAX(ts),0) FROM snapshots),
+	   ticks=(SELECT COUNT(*) FROM snapshots)
+	 WHERE id=1`)
+	return err
+}
+
+// SumSnapshots computes the lifetime totals directly from raw ticks. Only used
+// to verify the maintained row (tests, repair) — never on a request path.
+func (s *Store) SumSnapshots() (cost float64, requests, tokIn, tokOut, tokCache, errN int64) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	row := s.db.QueryRow(
 		`SELECT COALESCE(SUM(d_cost),0), COALESCE(SUM(d_requests),0), COALESCE(SUM(d_tok_in),0),
 		        COALESCE(SUM(d_tok_out),0), COALESCE(SUM(d_tok_cache),0), COALESCE(SUM(d_err),0)
 		 FROM snapshots`)
+	_ = row.Scan(&cost, &requests, &tokIn, &tokOut, &tokCache, &errN)
+	return
+}
+
+// LifetimeTotals sums the retained window. This is the dashboard's
+// headline lifetime cost — it survives verloc restarts.
+// LifetimeTotals reads the running totals row maintained by InsertDelta.
+// It is an O(1) primary-key lookup: previously this SUMmed the entire snapshots
+// table on every /dash/api/state poll (250ms at 1M ticks) while holding s.mu,
+// which blocked the analytics writer for 241ms each time.
+func (s *Store) LifetimeTotals() (cost float64, requests, tokIn, tokOut, tokCache, errN int64) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	row := s.db.QueryRow(
+		`SELECT cost, requests, tok_in, tok_out, tok_cache, err FROM analytics_totals WHERE id=1`)
 	_ = row.Scan(&cost, &requests, &tokIn, &tokOut, &tokCache, &errN)
 	return
 }
@@ -609,6 +1226,17 @@ type TelemetryStatus struct {
 
 func (s *Store) Telemetry() TelemetryStatus {
 	return TelemetryStatus{s.queued.Load() + int64(len(s.keyEvCh)), s.requestDrop.Load(), s.keyEvDrop.Load(), s.writeErrors.Load(), s.lastWrite.Load()}
+}
+
+// invalidateSummary drops memoised page summaries. Called whenever rows are
+// inserted: a cached total must never outlive the data it describes (a window
+// like "last 1h" gains rows continuously).
+func (s *Store) invalidateSummary() {
+	s.summaryMu.Lock()
+	if len(s.summaryCache) > 0 {
+		s.summaryCache = map[string]summaryCacheEntry{}
+	}
+	s.summaryMu.Unlock()
 }
 
 func (s *Store) noteWrite(err error) {
@@ -740,7 +1368,11 @@ func (s *Store) insertRequests(batch []ReqRecord) error {
 			return err
 		}
 	}
-	return tx.Commit()
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	s.invalidateSummary()
+	return nil
 }
 
 func (s *Store) Close() error {
@@ -777,7 +1409,14 @@ func (s *Store) Backup(path string) error {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	_, err = s.db.Exec(`VACUUM INTO '` + strings.ReplaceAll(path, `'`, `''`) + `'`)
+	// Bind the destination as a parameter (SQLite supports VACUUM INTO ?)
+	// rather than splicing it into the SQL text. The previous manual
+	// single-quote escaping was correct but fragile: any future edit that
+	// forgot a quote would turn a crafted path into SQL injection, and it is
+	// a needless second escaping rule next to control_store.go's parameterized
+	// form. Verified against modernc.org/sqlite (v1.56.0): the bound form
+	// compiles and writes the destination file.
+	_, err = s.db.Exec(`VACUUM INTO ?`, path)
 	if err != nil {
 		os.Remove(path)
 	}
@@ -905,6 +1544,21 @@ func scanSummary(row interface{ Scan(...any) error }, s *RequestSummary) error {
 	return row.Scan(&s.Requests, &s.Errors, &s.TokIn, &s.TokOut, &s.TokCache, &s.Cost, &s.UnknownUsage, &s.UnknownCost, &s.AvgLatencyMs, &s.AvgTTFTMs)
 }
 
+// summaryCache memoises the full-scan summary aggregate. The dashboard
+// recomputes it on every pagination click (the same filter, a new cursor), so
+// without this a 300k-row history paid 138ms per click. Keyed by the filter
+// identity (which excludes the cursor), so paging within one filter is free and
+// any filter change recomputes. Bounded to a few entries; the dashboard uses
+// one filter at a time per tab.
+type summaryCacheEntry struct {
+	at int64
+	s  RequestSummary
+}
+
+// summaryMemoTTLMs is a safety net behind write-triggered invalidation: a
+// summary is honoured for at most a few seconds, matching the ticker cadence.
+const summaryMemoTTLMs = 3000
+
 func (s *Store) Requests(ctx context.Context, f RequestFilter) (RequestPage, error) {
 	out := RequestPage{Requests: []ReqRecord{}}
 	where, args := f.where(false)
@@ -914,8 +1568,35 @@ func (s *Store) Requests(ctx context.Context, f RequestFilter) (RequestPage, err
 		return out, err
 	}
 	defer tx.Rollback()
-	if err = scanSummary(tx.QueryRowContext(ctx, `SELECT `+summarySQL+` FROM requests WHERE `+where, args...), &out.Summary); err != nil {
-		return out, err
+	// Serve the summary from cache when the same filter is being paged: the
+	// aggregate covers the whole filtered set, so it cannot change while only
+	// the cursor moves. This removes a full scan from every "next page" click.
+	// cacheKey deliberately excludes the cursor and the limit.
+	cacheKey := f.Model + "\x00" + f.Backend + "\x00" + f.ClientKeyID + "\x00" + f.Status + "\x00" + f.Q +
+		"\x00" + strconv.FormatInt(f.Since, 10) + "\x00" + strconv.FormatInt(f.Until, 10)
+	s.summaryMu.Lock()
+	cached, ok := s.summaryCache[cacheKey]
+	if ok && nowMs()-cached.at > summaryMemoTTLMs {
+		ok = false
+	}
+	s.summaryMu.Unlock()
+	if ok {
+		out.Summary = cached.s
+	} else {
+		if err = scanSummary(tx.QueryRowContext(ctx, `SELECT `+summarySQL+` FROM requests WHERE `+where, args...), &out.Summary); err != nil {
+			return out, err
+		}
+		s.summaryMu.Lock()
+		if s.summaryCache == nil {
+			s.summaryCache = map[string]summaryCacheEntry{}
+		}
+		if len(s.summaryCache) >= 8 {
+			for k := range s.summaryCache {
+				delete(s.summaryCache, k)
+			}
+		}
+		s.summaryCache[cacheKey] = summaryCacheEntry{at: nowMs(), s: out.Summary}
+		s.summaryMu.Unlock()
 	}
 	out.Total = out.Summary.Requests
 	if f.Cursor != "" {
@@ -962,6 +1643,33 @@ type usageAccumulator struct {
 	latSum, ttftSum   float64
 	ttftN             int64
 	latHist, ttftHist [len(latBuckets) + 1]uint64
+}
+
+// addColumns accumulates one request from its stored columns. It must stay
+// exactly equivalent to addRecord (which takes a full ReqRecord) so the SQL
+// projection cannot change any reported total.
+func (a *usageAccumulator) addColumns(ok, usageKnown, costKnown bool, tin, tout, tcache uint64, cost, latMs, ttftMs float64) {
+	a.Requests++
+	if !ok {
+		a.Errors++
+	}
+	a.TokIn += tin
+	a.TokOut += tout
+	a.TokCache += tcache
+	a.Cost += cost
+	if !usageKnown {
+		a.UnknownUsage++
+	}
+	if !costKnown {
+		a.UnknownCost++
+	}
+	a.latSum += latMs
+	a.latHist[bucketOf(latMs)]++
+	if ttftMs > 0 {
+		a.ttftSum += ttftMs
+		a.ttftN++
+		a.ttftHist[bucketOf(ttftMs)]++
+	}
 }
 
 func (a *usageAccumulator) addRecord(r ReqRecord) {
@@ -1112,31 +1820,40 @@ func (s *Store) Analytics(ctx context.Context, f RequestFilter) (AnalyticsResult
 			out.Coverage.NewestTS = ts
 		}
 	}
+	// Project the aggregate columns instead of the JSON `record` blob: every
+	// field this function sums already lives in a column, so decoding 200k
+	// ReqRecord values was pure waste (measured 262MB / 3.2M allocs, and the
+	// dominant cost of the unfiltered query). The accumulator is filled
+	// directly, which also removes the intermediate ReqRecord entirely.
 	where, args := f.where(false)
-	rows, err := tx.QueryContext(ctx, `SELECT record FROM requests WHERE `+where, args...)
+	rows, err := tx.QueryContext(ctx, `SELECT ts, model, backend, client_key_id, client_name, status, ok,
+	                                        tok_in, tok_out, tok_cache, cost, usage_known, cost_known, lat_ms, ttft_ms
+	                                 FROM requests WHERE `+where, args...)
 	if err != nil {
 		return out, err
 	}
 	for rows.Next() {
-		var raw string
-		if err = rows.Scan(&raw); err != nil {
-			rows.Close()
-			return out, err
-		}
-		var r ReqRecord
-		if err = json.Unmarshal([]byte(raw), &r); err != nil {
+		var (
+			ts, status                  int64
+			ok, usageKnown, costKnown   bool
+			model, backend, ckID, cName string
+			tin, tout, tcache           uint64
+			cost, lat, ttft             float64
+		)
+		if err = rows.Scan(&ts, &model, &backend, &ckID, &cName, &status, &ok,
+			&tin, &tout, &tcache, &cost, &usageKnown, &costKnown, &lat, &ttft); err != nil {
 			rows.Close()
 			return out, err
 		}
 		a := &usageAccumulator{}
-		a.addRecord(r)
-		add(r.Model, r.Backend, r.ClientKeyID, r.ClientName, r.Status, r.TS, a)
-		cover(r.TS)
-		if out.Coverage.DetailOldestTS == 0 || r.TS < out.Coverage.DetailOldestTS {
-			out.Coverage.DetailOldestTS = r.TS
+		a.addColumns(ok, usageKnown, costKnown, tin, tout, tcache, cost, lat, ttft)
+		add(model, backend, ckID, cName, int(status), ts, a)
+		cover(ts)
+		if out.Coverage.DetailOldestTS == 0 || ts < out.Coverage.DetailOldestTS {
+			out.Coverage.DetailOldestTS = ts
 		}
-		if r.TS > out.Coverage.DetailNewestTS {
-			out.Coverage.DetailNewestTS = r.TS
+		if ts > out.Coverage.DetailNewestTS {
+			out.Coverage.DetailNewestTS = ts
 		}
 	}
 	err = rows.Err()

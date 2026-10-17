@@ -387,7 +387,7 @@ func TestStreamCompletionAndUsageProtocols(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			var in, out, cache uint64
 			known := false
-			err := streamCopyWithUsage(httptest.NewRecorder(), strings.NewReader(tc.payload), func(i, o, c uint64) { in, out, cache, known = i, o, c, true }, nil, nil)
+			err := streamCopyWithUsage(httptest.NewRecorder(), strings.NewReader(tc.payload), func(i, o, c uint64) { in, out, cache, known = i, o, c, true }, nil, streamOptions{})
 			if (err == nil) != tc.success || known != tc.known || in != tc.in || out != tc.out || cache != tc.cache {
 				t.Fatalf("err=%v usage=(%d,%d,%d,%v)", err, in, out, cache, known)
 			}

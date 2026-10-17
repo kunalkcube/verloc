@@ -28,6 +28,16 @@ const (
 	ownerSessionCookie      = "verloc_session"
 	ownerSessionLifetime    = 24 * time.Hour
 	loginWindow             = 15 * time.Minute
+	loginAttemptLimit       = 8
+	loginRetryAfter         = "900"
+	// loginMaxEntries caps throttle-map memory. Entries whose window has fully
+	// elapsed are pruned first, so the cap only rejects a login when the map is
+	// saturated with still-active throttles; without the prune-first ordering a
+	// capped map could reject an unthrottled IP.
+	loginMaxEntries = 4096
+	// loginSweepLimit bounds the O(n) expiry sweep performed per attempt so an
+	// unauthenticated probe cannot force a full-map scan of up to loginMaxEntries.
+	loginSweepLimit = 64
 )
 
 type SecurityOptions struct {
@@ -43,15 +53,16 @@ type loginAttempts struct {
 // Security owns the sole owner's sessions and the independent inference-key namespace.
 // The control database contains only password/token hashes, never usable credentials.
 type Security struct {
-	control    *ControlStore
-	options    SecurityOptions
-	authMu     sync.Mutex
-	loginMu    sync.Mutex
-	logins     map[string]loginAttempts
-	loginSlots chan struct{}
-	mu         sync.Mutex
-	keys       map[[32]byte]*clientKeyRecord
-	clients    map[string]*clientKeyRecord
+	control      *ControlStore
+	options      SecurityOptions
+	authMu       sync.Mutex
+	loginMu      sync.Mutex
+	logins       map[string]loginAttempts
+	loginSweepAt time.Time
+	loginSlots   chan struct{}
+	mu           sync.Mutex
+	keys         map[[32]byte]*clientKeyRecord
+	clients      map[string]*clientKeyRecord
 }
 
 func NewSecurity(control *ControlStore, options SecurityOptions) (*Security, error) {
@@ -225,19 +236,53 @@ func (s *Security) session(r *http.Request) (string, [32]byte, bool) {
 }
 
 func (s *Security) CheckAdmin(w http.ResponseWriter, r *http.Request) bool {
+	_, ok := s.checkAdmin(w, r)
+	return ok
+}
+
+// checkAdmin performs the full owner check (origin, session lookup, CSRF) and
+// returns the validated session hash. Handlers that must re-confirm the session
+// after acquiring authMu (password rotation) reuse this hash with sessionCurrent
+// instead of issuing a second, redundant full validation + SQLite lookup.
+func (s *Security) checkAdmin(w http.ResponseWriter, r *http.Request) ([32]byte, bool) {
 	if !s.requireSecurityOrigin(w, r) {
-		return false
+		return [32]byte{}, false
 	}
-	csrf, _, ok := s.session(r)
+	csrf, hash, ok := s.session(r)
 	if !ok {
 		writeErr(w, http.StatusUnauthorized, "owner authentication required")
-		return false
+		return [32]byte{}, false
 	}
-	if unsafeSecurityMethod(r.Method) && subtle.ConstantTimeCompare([]byte(csrf), []byte(r.Header.Get("X-CSRF-Token"))) != 1 {
+	// Compare fixed-width SHA-256 digests: subtle.ConstantTimeCompare (and
+	// hmac.Equal, which wraps it) short-circuits on unequal lengths and would
+	// leak the attacker-controlled X-CSRF-Token length via timing.
+	if unsafeSecurityMethod(r.Method) && !constantTimeTokenEqual(csrf, r.Header.Get("X-CSRF-Token")) {
 		writeErr(w, http.StatusForbidden, "CSRF token required")
-		return false
+		return [32]byte{}, false
 	}
-	return true
+	return hash, true
+}
+
+// sessionCurrent reports whether an already-validated session is still present
+// and unexpired. Callers hold s.authMu, which serializes the only operation
+// that can invalidate a session (password rotation, which deletes every row),
+// so a single indexed lookup is sufficient: the request's origin and CSRF token
+// cannot change between the initial check and this one.
+func (s *Security) sessionCurrent(r *http.Request, hash [32]byte) bool {
+	var one int
+	err := s.control.db.QueryRowContext(r.Context(), "SELECT 1 FROM admin_sessions WHERE token_hash=? AND expires_at>?", hash[:], time.Now().UnixMilli()).Scan(&one)
+	return err == nil
+}
+
+// constantTimeTokenEqual compares two tokens in constant time regardless of
+// length by hashing both to fixed-width digests first. It is used for the CSRF
+// header, the only comparison in this file whose input length is attacker
+// controlled; the password and setup-token compares always operate on equal,
+// fixed-width inputs and can use subtle.ConstantTimeCompare directly.
+func constantTimeTokenEqual(expected, provided string) bool {
+	expectedHash := sha256.Sum256([]byte(expected))
+	providedHash := sha256.Sum256([]byte(provided))
+	return subtle.ConstantTimeCompare(expectedHash[:], providedHash[:]) == 1
 }
 
 func (s *Security) AdminMiddleware(next http.Handler) http.Handler {
@@ -279,15 +324,18 @@ func (s *Security) beginLogin(w http.ResponseWriter, r *http.Request) bool {
 	}
 	now := time.Now()
 	s.loginMu.Lock()
-	for addr, attempts := range s.logins {
-		if now.Sub(attempts.start) >= loginWindow {
-			delete(s.logins, addr)
-		}
-	}
+	s.sweepLogins(now)
 	a, exists := s.logins[ip]
-	if (!exists && len(s.logins) >= 4096) || a.count >= 8 {
+	// Reset the caller's own entry the moment its window lapses so a throttled
+	// IP is released exactly at loginWindow, independently of the bounded sweep.
+	if exists && now.Sub(a.start) >= loginWindow {
+		delete(s.logins, ip)
+		a = loginAttempts{}
+		exists = false
+	}
+	if (!exists && len(s.logins) >= loginMaxEntries) || a.count >= loginAttemptLimit {
 		s.loginMu.Unlock()
-		w.Header().Set("Retry-After", "900")
+		w.Header().Set("Retry-After", loginRetryAfter)
 		writeErr(w, http.StatusTooManyRequests, "authentication temporarily unavailable")
 		return false
 	}
@@ -305,6 +353,44 @@ func (s *Security) beginLogin(w http.ResponseWriter, r *http.Request) bool {
 		writeErr(w, http.StatusTooManyRequests, "authentication temporarily unavailable")
 		return false
 	}
+}
+
+// sweepLogins prunes elapsed throttle entries. It runs while holding s.loginMu
+// and bounds its work two ways so an unauthenticated probe cannot turn it into a
+// full-map scan of up to loginMaxEntries: at most one non-empty sweep per
+// loginWindow, and at most loginSweepLimit deletions per non-empty sweep.
+// Because that leaves an occasional stale entry, the scan also runs whenever the
+// map is at/over the cap: it then evicts every elapsed entry (violating only the
+// per-call work bound, never the memory bound) before the caller's cap check, so
+// the map always drops back below loginMaxEntries. Deleting only elapsed entries
+// never removes an active throttle, keeping the 8-per-15-minute limit exact.
+func (s *Security) sweepLogins(now time.Time) {
+	empty := len(s.logins) == 0
+	if empty && !s.loginSweepAt.IsZero() && now.Sub(s.loginSweepAt) < loginWindow {
+		return
+	}
+	if empty {
+		s.loginSweepAt = now
+		return
+	}
+	full := len(s.logins) >= loginMaxEntries
+	if !full && !s.loginSweepAt.IsZero() && now.Sub(s.loginSweepAt) < loginWindow {
+		return
+	}
+	limit := loginSweepLimit
+	if full {
+		limit = len(s.logins)
+	}
+	for addr, attempts := range s.logins {
+		if limit <= 0 {
+			break
+		}
+		if now.Sub(attempts.start) >= loginWindow {
+			delete(s.logins, addr)
+			limit--
+		}
+	}
+	s.loginSweepAt = now
 }
 
 func deriveOwnerPassword(password string, salt []byte) ([]byte, error) {
@@ -500,7 +586,8 @@ func (s *Security) handleAuthLogout(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Security) handleAuthPassword(w http.ResponseWriter, r *http.Request) {
-	if !s.CheckAdmin(w, r) || !s.beginLogin(w, r) {
+	sessionHash, ok := s.checkAdmin(w, r)
+	if !ok || !s.beginLogin(w, r) {
 		return
 	}
 	defer func() { <-s.loginSlots }()
@@ -521,7 +608,10 @@ func (s *Security) handleAuthPassword(w http.ResponseWriter, r *http.Request) {
 	}
 	s.authMu.Lock()
 	defer s.authMu.Unlock()
-	if !s.CheckAdmin(w, r) {
+	// Re-confirm the session survived a concurrent password rotation without a
+	// second origin+CSRF+session round trip (see checkAdmin/sessionCurrent).
+	if !s.sessionCurrent(r, sessionHash) {
+		writeErr(w, http.StatusUnauthorized, "owner authentication required")
 		return
 	}
 	var oldSalt, expected []byte
