@@ -1,0 +1,2240 @@
+[
+  {
+    "id": "cb/gpt-oss-120b",
+    "object": "model",
+    "created": 1755815280,
+    "owned_by": "openai",
+    "upstream": "gpt-oss-120b",
+    "context_window": 131072,
+    "max_tokens": 65536,
+    "type": "language",
+    "name": "GPT OSS 120B (cerebras)",
+    "description": "Extremely capable general-purpose LLM with strong, controllable reasoning capabilities",
+    "tags": [
+      "reasoning",
+      "tool-use",
+      "implicit-caching"
+    ],
+    "pricing": {
+      "prompt": "0.0000001",
+      "completion": "0.0000005"
+    },
+    "pricing_per_million": {
+      "input": 0.1,
+      "output": 0.5,
+      "cache_read": 0,
+      "currency": "USD",
+      "per": "1M tokens"
+    },
+    "released": 1754352000,
+    "attachment": false,
+    "reasoning": true
+  },
+  {
+    "id": "cb/zai-glm-4.7",
+    "object": "model",
+    "created": 1755815280,
+    "owned_by": "zai",
+    "upstream": "zai-glm-4.7",
+    "context_window": 200000,
+    "max_tokens": 120000,
+    "type": "language",
+    "name": "GLM 4.7 (cerebras)",
+    "description": "GLM-4.7 is Z.ai’s latest flagship model, with major upgrades focused on two key areas: stronger coding capabilities and more stable multi-step reasoning and execution.",
+    "tags": [
+      "reasoning",
+      "tool-use",
+      "implicit-caching"
+    ],
+    "pricing": {
+      "prompt": "0.0000006",
+      "completion": "0.0000022",
+      "input_cache_read": "0.00000012"
+    },
+    "pricing_per_million": {
+      "input": 0.6,
+      "output": 2.2,
+      "cache_read": 0.12,
+      "currency": "USD",
+      "per": "1M tokens"
+    },
+    "released": 1766361600,
+    "attachment": false,
+    "reasoning": true
+  },
+  {
+    "id": "cf/kimi-k2.7-code",
+    "object": "model",
+    "created": 1755815280,
+    "owned_by": "moonshotai",
+    "upstream": "@cf/moonshotai/kimi-k2.7-code",
+    "context_window": 256000,
+    "max_tokens": 32768,
+    "type": "language",
+    "name": "Kimi K2.7 Code (cloudflare)",
+    "description": "Kimi-K2.7-Code is a coding model from Moonshot AI. It has  improved coding & agent performance over K2.6, more reasoning efficiency with less overthinking, and improved instruction following for long-horizon coding.",
+    "tags": [
+      "reasoning",
+      "tool-use",
+      "implicit-caching",
+      "file-input",
+      "vision"
+    ],
+    "pricing": {
+      "prompt": "0.00000095",
+      "completion": "0.000004",
+      "input_cache_read": "0.00000019"
+    },
+    "pricing_per_million": {
+      "input": 0.95,
+      "output": 4,
+      "cache_read": 0.19,
+      "currency": "USD",
+      "per": "1M tokens"
+    },
+    "released": 1781222400,
+    "attachment": true,
+    "reasoning": true
+  },
+  {
+    "id": "fi/deepseek-v4-flash",
+    "object": "model",
+    "created": 1755815280,
+    "owned_by": "deepseek",
+    "upstream": "deepseek-v4-flash",
+    "context_window": 1000000,
+    "max_tokens": 131072,
+    "type": "language",
+    "name": "DeepSeek V4 Flash (freeinference)",
+    "description": "DeepSeek V4 Flash is a fast, efficient model optimized for coding and reasoning tasks with a 1M token context window. Free tier served via opencode Zen.",
+    "tags": [
+      "reasoning",
+      "tool-use",
+      "implicit-caching"
+    ],
+    "pricing": {
+      "prompt": "0.00000014",
+      "completion": "0.00000028",
+      "input_cache_read": "0.000000028"
+    },
+    "pricing_per_million": {
+      "input": 0.14,
+      "output": 0.28,
+      "cache_read": 0.028,
+      "currency": "USD",
+      "per": "1M tokens"
+    },
+    "released": 1776902400,
+    "attachment": false,
+    "reasoning": true
+  },
+  {
+    "id": "fi/glm-5.1",
+    "object": "model",
+    "created": 1755815280,
+    "owned_by": "zai",
+    "upstream": "glm-5.1",
+    "context_window": 200000,
+    "max_tokens": 128000,
+    "type": "language",
+    "name": "GLM 5.1 (freeinference)",
+    "description": "Z.ai's GLM-5.1 model with strong reasoning and coding capabilities.",
+    "tags": [
+      "reasoning",
+      "tool-use",
+      "implicit-caching"
+    ],
+    "pricing": {
+      "prompt": "0.0000028",
+      "completion": "0.0000064",
+      "input_cache_read": "0.00000056"
+    },
+    "pricing_per_million": {
+      "input": 2.8,
+      "output": 6.4,
+      "cache_read": 0.56,
+      "currency": "USD",
+      "per": "1M tokens"
+    },
+    "released": 1781568000,
+    "attachment": false,
+    "reasoning": true
+  },
+  {
+    "id": "fi/minimax-m3",
+    "object": "model",
+    "created": 1755815280,
+    "owned_by": "minimax",
+    "upstream": "minimax-m3",
+    "context_window": 1000000,
+    "max_tokens": 1000000,
+    "type": "language",
+    "name": "MiniMax M3 (freeinference)",
+    "description": "MiniMax-M3 is a frontier-class foundation model that unites the three capabilities defining today's frontier: a 1M-token con…ng and agentic performance, and native multimodality — the first open-weight model to deliver all three in a single system.",
+    "tags": [
+      "reasoning",
+      "tool-use",
+      "vision",
+      "file-input",
+      "implicit-caching"
+    ],
+    "pricing": {
+      "prompt": "0.0000005",
+      "completion": "0.000002",
+      "input_cache_read": "0.0000001"
+    },
+    "pricing_per_million": {
+      "input": 0.5,
+      "output": 2,
+      "cache_read": 0.1,
+      "currency": "USD",
+      "per": "1M tokens",
+      "input_tiers": [
+        {
+          "cost": 0.3,
+          "min": 0,
+          "max": 512000
+        },
+        {
+          "cost": 1.2,
+          "min": 512000
+        }
+      ],
+      "output_tiers": [
+        {
+          "cost": 1.2,
+          "min": 0,
+          "max": 512000
+        },
+        {
+          "cost": 4.8,
+          "min": 512000
+        }
+      ],
+      "input_cache_read_tiers": [
+        {
+          "cost": 0.06,
+          "min": 0,
+          "max": 512000
+        },
+        {
+          "cost": 0.24,
+          "min": 512000
+        }
+      ]
+    },
+    "released": 1780185600,
+    "attachment": true,
+    "reasoning": true
+  },
+  {
+    "id": "gm/MiniMaxAI/MiniMax-M3",
+    "object": "model",
+    "created": 1755815280,
+    "owned_by": "minimax",
+    "upstream": "MiniMaxAI/MiniMax-M3",
+    "context_window": 1000000,
+    "max_tokens": 1000000,
+    "type": "language",
+    "name": "MiniMax M3 (gmi)",
+    "description": "MiniMax-M3 is a frontier-class foundation model that unites the three capabilities defining today's frontier: a 1M-token con…ng and agentic performance, and native multimodality — the first open-weight model to deliver all three in a single system.",
+    "tags": [
+      "reasoning",
+      "tool-use",
+      "vision",
+      "file-input",
+      "implicit-caching"
+    ],
+    "pricing": {
+      "prompt": "0.0000003",
+      "completion": "0.0000012",
+      "input_cache_read": "0.00000006"
+    },
+    "pricing_per_million": {
+      "input": 0.3,
+      "output": 1.2,
+      "cache_read": 0.06,
+      "currency": "USD",
+      "per": "1M tokens",
+      "input_tiers": [
+        {
+          "cost": 0.3,
+          "min": 0,
+          "max": 512000
+        },
+        {
+          "cost": 1.2,
+          "min": 512000
+        }
+      ],
+      "output_tiers": [
+        {
+          "cost": 1.2,
+          "min": 0,
+          "max": 512000
+        },
+        {
+          "cost": 4.8,
+          "min": 512000
+        }
+      ],
+      "input_cache_read_tiers": [
+        {
+          "cost": 0.06,
+          "min": 0,
+          "max": 512000
+        },
+        {
+          "cost": 0.24,
+          "min": 512000
+        }
+      ]
+    },
+    "released": 1780185600,
+    "attachment": true,
+    "reasoning": true
+  },
+  {
+    "id": "gq/openai/gpt-oss-120b",
+    "object": "model",
+    "created": 1755815280,
+    "owned_by": "openai",
+    "upstream": "openai/gpt-oss-120b",
+    "context_window": 131072,
+    "max_tokens": 65536,
+    "type": "language",
+    "name": "GPT OSS 120B",
+    "description": "Extremely capable general-purpose LLM with strong, controllable reasoning capabilities",
+    "tags": [
+      "reasoning",
+      "tool-use",
+      "implicit-caching"
+    ],
+    "pricing": {
+      "prompt": "0.0000001",
+      "completion": "0.0000005"
+    },
+    "pricing_per_million": {
+      "input": 0.09999999999999999,
+      "output": 0.5,
+      "cache_read": 0,
+      "currency": "USD",
+      "per": "1M tokens"
+    },
+    "released": 1754352000,
+    "attachment": false,
+    "reasoning": false
+  },
+  {
+    "id": "hy/deepseek-v4-flash-0731",
+    "object": "model",
+    "created": 1785637554,
+    "owned_by": "hyper",
+    "upstream": "deepseek-v4-flash-0731",
+    "context_window": 1000000,
+    "max_tokens": 384000,
+    "type": "language",
+    "name": "DeepSeek V4 Flash 0731 (hyper)",
+    "description": "",
+    "tags": [],
+    "pricing": {
+      "prompt": "0.0000002",
+      "completion": "0.0000004",
+      "input_cache_read": "0.00000004"
+    },
+    "pricing_per_million": {
+      "input": 0.2,
+      "output": 0.4,
+      "cache_read": 0.04,
+      "currency": "USD",
+      "per": "1M tokens"
+    },
+    "attachment": false,
+    "reasoning": true
+  },
+  {
+    "id": "hy/kimi-k3",
+    "object": "model",
+    "created": 1755815280,
+    "owned_by": "moonshotai",
+    "upstream": "kimi-k3",
+    "context_window": 1000000,
+    "max_tokens": 131072,
+    "type": "language",
+    "name": "Kimi K3 (hyper)",
+    "description": "Kimi’s flagship model for long-horizon coding and end-to-end knowledge work, with a 1M-token context window.",
+    "tags": [
+      "reasoning",
+      "tool-use",
+      "implicit-caching",
+      "file-input",
+      "vision"
+    ],
+    "pricing": {
+      "prompt": "0.0000032664",
+      "completion": "0.000016332",
+      "input_cache_read": "0.0000003266"
+    },
+    "pricing_per_million": {
+      "input": 3.2664,
+      "output": 16.332,
+      "cache_read": 0.32664,
+      "currency": "USD",
+      "per": "1M tokens"
+    },
+    "released": 1784160000,
+    "attachment": true,
+    "reasoning": true
+  },
+  {
+    "id": "hy/minimax-m3",
+    "object": "model",
+    "created": 1755815280,
+    "owned_by": "minimax",
+    "upstream": "minimax-m3",
+    "context_window": 1000000,
+    "max_tokens": 1000000,
+    "type": "language",
+    "name": "MiniMax M3 (hyper)",
+    "description": "MiniMax-M3 is a frontier-class foundation model that unites the three capabilities defining today's frontier: a 1M-token con…ng and agentic performance, and native multimodality — the first open-weight model to deliver all three in a single system.",
+    "tags": [
+      "reasoning",
+      "tool-use",
+      "vision",
+      "file-input",
+      "implicit-caching"
+    ],
+    "pricing": {
+      "prompt": "0.0000003266",
+      "completion": "0.0000013066",
+      "input_cache_read": "0.0000000642"
+    },
+    "pricing_per_million": {
+      "input": 0.32664,
+      "output": 1.30656,
+      "cache_read": 0.0642392,
+      "currency": "USD",
+      "per": "1M tokens",
+      "input_tiers": [
+        {
+          "cost": 0.3,
+          "min": 0,
+          "max": 512000
+        },
+        {
+          "cost": 1.2,
+          "min": 512000
+        }
+      ],
+      "output_tiers": [
+        {
+          "cost": 1.2,
+          "min": 0,
+          "max": 512000
+        },
+        {
+          "cost": 4.8,
+          "min": 512000
+        }
+      ],
+      "input_cache_read_tiers": [
+        {
+          "cost": 0.06,
+          "min": 0,
+          "max": 512000
+        },
+        {
+          "cost": 0.24,
+          "min": 512000
+        }
+      ]
+    },
+    "released": 1780185600,
+    "attachment": true,
+    "reasoning": true
+  },
+  {
+    "id": "hy/qwen3.8-max",
+    "object": "model",
+    "created": 1785762588,
+    "owned_by": "hyper",
+    "upstream": "qwen3.8-max",
+    "context_window": 1000000,
+    "max_tokens": 65536,
+    "type": "language",
+    "name": "Qwen3.8 Max (hyper)",
+    "description": "",
+    "tags": [],
+    "pricing": {
+      "prompt": "0.000002",
+      "completion": "0.000006",
+      "input_cache_read": "0.00000025"
+    },
+    "pricing_per_million": {
+      "input": 2,
+      "output": 6,
+      "cache_read": 0.25,
+      "currency": "USD",
+      "per": "1M tokens"
+    },
+    "attachment": true,
+    "reasoning": false
+  },
+  {
+    "id": "ml/mistral-medium-3-5",
+    "object": "model",
+    "created": 1755815280,
+    "owned_by": "mistral",
+    "upstream": "mistral-medium-3-5",
+    "context_window": 256000,
+    "max_tokens": 256000,
+    "type": "language",
+    "name": "Mistral Medium Latest (mistral)",
+    "description": "Mistral's frontier-class multimodal model optimized for agentic and coding use cases.",
+    "tags": [
+      "reasoning",
+      "tool-use",
+      "vision"
+    ],
+    "pricing": {
+      "prompt": "0.0000015",
+      "completion": "0.0000075"
+    },
+    "pricing_per_million": {
+      "input": 1.5,
+      "output": 7.5,
+      "cache_read": 0,
+      "currency": "USD",
+      "per": "1M tokens"
+    },
+    "released": 1777420800,
+    "attachment": true,
+    "reasoning": true
+  },
+  {
+    "id": "no/mindai/macaron-v1-venti",
+    "object": "model",
+    "created": 1755815280,
+    "owned_by": "mindai",
+    "upstream": "mindai/macaron-v1-venti",
+    "context_window": 1048576,
+    "max_tokens": 131072,
+    "type": "language",
+    "name": "Macaron V1 Venti (novita)",
+    "description": "MindAI Macaron V1 Venti — GLM 5.2 tier free model served via Novita, with 1M context and 131K max output.",
+    "tags": [
+      "reasoning",
+      "tool-use",
+      "implicit-caching"
+    ],
+    "pricing": {
+      "prompt": "0",
+      "completion": "0"
+    },
+    "pricing_per_million": {
+      "input": 0,
+      "output": 0,
+      "cache_read": 0,
+      "currency": "USD",
+      "per": "1M tokens"
+    },
+    "released": 1784505600,
+    "attachment": false,
+    "reasoning": true
+  },
+  {
+    "id": "nv/deepseek-ai/deepseek-v4-pro",
+    "object": "model",
+    "created": 1755815280,
+    "owned_by": "deepseek",
+    "upstream": "deepseek-ai/deepseek-v4-pro",
+    "context_window": 1000000,
+    "max_tokens": 384000,
+    "type": "language",
+    "name": "DeepSeek V4 Pro (nvidia)",
+    "description": "DeepSeek-V4 series incorporate several key upgrades in architecture and optimization: (1) a hybrid attention architecture th…nhance conventional residual connections; (3)\\nand the Muon optimizer for faster convergence and greater training stability",
+    "tags": [
+      "reasoning",
+      "tool-use",
+      "implicit-caching"
+    ],
+    "pricing": {
+      "prompt": "0.000000435",
+      "completion": "0.00000087",
+      "input_cache_read": "0.0000000036"
+    },
+    "pricing_per_million": {
+      "input": 0.435,
+      "output": 0.87,
+      "cache_read": 0.0036,
+      "currency": "USD",
+      "per": "1M tokens"
+    },
+    "released": 1776902400,
+    "attachment": false,
+    "reasoning": true
+  },
+  {
+    "id": "nv/minimaxai/minimax-m3",
+    "object": "model",
+    "created": 1755815280,
+    "owned_by": "minimax",
+    "upstream": "minimaxai/minimax-m3",
+    "context_window": 1000000,
+    "max_tokens": 1000000,
+    "type": "language",
+    "name": "MiniMax M3 (nvidia)",
+    "description": "MiniMax-M3 is a frontier-class foundation model that unites the three capabilities defining today's frontier: a 1M-token con…ng and agentic performance, and native multimodality — the first open-weight model to deliver all three in a single system.",
+    "tags": [
+      "reasoning",
+      "tool-use",
+      "vision",
+      "file-input",
+      "implicit-caching"
+    ],
+    "pricing": {
+      "prompt": "0.0000003",
+      "completion": "0.0000012",
+      "input_cache_read": "0.00000006"
+    },
+    "pricing_per_million": {
+      "input": 0.3,
+      "output": 1.2,
+      "cache_read": 0.06,
+      "currency": "USD",
+      "per": "1M tokens",
+      "input_tiers": [
+        {
+          "cost": 0.3,
+          "min": 0,
+          "max": 512000
+        },
+        {
+          "cost": 1.2,
+          "min": 512000
+        }
+      ],
+      "output_tiers": [
+        {
+          "cost": 1.2,
+          "min": 0,
+          "max": 512000
+        },
+        {
+          "cost": 4.8,
+          "min": 512000
+        }
+      ],
+      "input_cache_read_tiers": [
+        {
+          "cost": 0.06,
+          "min": 0,
+          "max": 512000
+        },
+        {
+          "cost": 0.24,
+          "min": 512000
+        }
+      ]
+    },
+    "released": 1780185600,
+    "attachment": true,
+    "reasoning": true
+  },
+  {
+    "id": "nv/nvidia/nemotron-3-ultra-550b-a55b",
+    "object": "model",
+    "created": 1755815280,
+    "owned_by": "nvidia",
+    "upstream": "nvidia/nemotron-3-ultra-550b-a55b",
+    "context_window": 1000000,
+    "max_tokens": 65000,
+    "type": "language",
+    "name": "Nemotron 3 Ultra (nvidia)",
+    "description": "A 550B parameter (55B active) open reasoning model from NVIDIA, built for long-running agent workflows. Free tier served via opencode Zen.",
+    "tags": [
+      "reasoning",
+      "tool-use",
+      "implicit-caching"
+    ],
+    "pricing": {
+      "prompt": "0.0000006",
+      "completion": "0.0000024",
+      "input_cache_read": "0.00000012"
+    },
+    "pricing_per_million": {
+      "input": 0.6,
+      "output": 2.4,
+      "cache_read": 0.12,
+      "currency": "USD",
+      "per": "1M tokens"
+    },
+    "released": 1780531200,
+    "attachment": false,
+    "reasoning": true
+  },
+  {
+    "id": "nv/stepfun-ai/step-3.7-flash",
+    "object": "model",
+    "created": 1755815280,
+    "owned_by": "stepfun",
+    "upstream": "stepfun-ai/step-3.7-flash",
+    "context_window": 256000,
+    "max_tokens": 256000,
+    "type": "language",
+    "name": "Step3.7 Flash (nvidia)",
+    "description": "StepFun’s flagship multimodal reasoning model. Powered by a 198B-parameter / 11B-activation sparse MoE architecture, with native support for image and video understanding.",
+    "tags": [
+      "implicit-caching",
+      "reasoning",
+      "tool-use",
+      "vision"
+    ],
+    "pricing": {
+      "prompt": "0.0000002",
+      "completion": "0.00000115",
+      "input_cache_read": "0.00000004"
+    },
+    "pricing_per_million": {
+      "input": 0.2,
+      "output": 1.15,
+      "cache_read": 0.04,
+      "currency": "USD",
+      "per": "1M tokens"
+    },
+    "released": 1779926400,
+    "attachment": true,
+    "reasoning": true
+  },
+  {
+    "id": "nv/thinkingmachines/inkling",
+    "object": "model",
+    "created": 1755815280,
+    "owned_by": "thinkingmachines",
+    "upstream": "thinkingmachines/inkling",
+    "context_window": 256000,
+    "max_tokens": 256000,
+    "type": "language",
+    "name": "Inkling (nvidia)",
+    "description": "Inkling is a multimodal MoE model (975B total, 41B active, 256k context) reasoning over text, image, and audio inputs.",
+    "tags": [
+      "reasoning",
+      "tool-use",
+      "vision",
+      "file-input"
+    ],
+    "pricing": {
+      "prompt": "0.000001",
+      "completion": "0.00000405",
+      "input_cache_read": "0.00000017"
+    },
+    "pricing_per_million": {
+      "input": 1,
+      "output": 4.05,
+      "cache_read": 0.17,
+      "currency": "USD",
+      "per": "1M tokens"
+    },
+    "released": 1784073600,
+    "attachment": true,
+    "reasoning": true
+  },
+  {
+    "id": "nv/z-ai/glm-5.2",
+    "object": "model",
+    "created": 1755815280,
+    "owned_by": "zai",
+    "upstream": "z-ai/glm-5.2",
+    "context_window": 1040000,
+    "max_tokens": 128000,
+    "type": "language",
+    "name": "GLM 5.2 (nvidia)",
+    "description": "GLM-5.2 delivers powerful coding capabilities, usable 1M-context support, and continued strengths in long-horizon tasks.",
+    "tags": [
+      "reasoning",
+      "tool-use",
+      "implicit-caching"
+    ],
+    "pricing": {
+      "prompt": "0.0000014",
+      "completion": "0.0000044",
+      "input_cache_read": "0.00000026"
+    },
+    "pricing_per_million": {
+      "input": 1.4,
+      "output": 4.4,
+      "cache_read": 0.26,
+      "currency": "USD",
+      "per": "1M tokens"
+    },
+    "released": 1781568000,
+    "attachment": false,
+    "reasoning": true
+  },
+  {
+    "id": "nv/deepseek-ai/deepseek-v4.1-flash",
+    "object": "model",
+    "created": 1755815280,
+    "owned_by": "deepseek",
+    "upstream": "deepseek-ai/deepseek-v4.1-flash",
+    "context_window": 1048576,
+    "max_tokens": 32768,
+    "type": "language",
+    "name": "DeepSeek V4.1 Flash (nvidia)",
+    "description": "DeepSeek V4.1 Flash is an AI model from DeepSeek designed for fast, efficient multimodal interactions. It combines native multimodal capabilities with a new architecture focused on stronger performance, faster responses, and lower computational cost.",
+    "tags": [
+      "reasoning",
+      "tool-use",
+      "implicit-caching",
+      "vision",
+      "structured-output"
+    ],
+    "pricing": {
+      "prompt": "0.0000003",
+      "completion": "0.0000012",
+      "input_cache_read": "0.000000007"
+    },
+    "pricing_per_million": {
+      "input": 0.3,
+      "output": 1.2,
+      "cache_read": 0.007,
+      "currency": "USD",
+      "per": "1M tokens"
+    },
+    "released": 1788825600,
+    "attachment": false,
+    "reasoning": true
+  },
+  {
+    "id": "nv/z-ai/glm-5.3",
+    "object": "model",
+    "created": 1755815280,
+    "owned_by": "zai",
+    "upstream": "z-ai/glm-5.3",
+    "context_window": 1000000,
+    "max_tokens": 1000000,
+    "type": "language",
+    "name": "GLM 5.3 (nvidia)",
+    "description": "GLM 5.3 delivers comprehensive advancements in complex software engineering and agent capabilities. It uses the same base model as GLM-5.2, with all improvements driven by post-training.",
+    "tags": [
+      "implicit-caching",
+      "reasoning",
+      "tool-use",
+      "structured-output"
+    ],
+    "pricing": {
+      "prompt": "0.0000014",
+      "completion": "0.0000044",
+      "input_cache_read": "0.00000014"
+    },
+    "pricing_per_million": {
+      "input": 1.4,
+      "output": 4.4,
+      "cache_read": 0.14,
+      "currency": "USD",
+      "per": "1M tokens"
+    },
+    "released": 1787011200,
+    "attachment": false,
+    "reasoning": true
+  },
+  {
+    "id": "nv/z-ai/glm-5.3-flash",
+    "object": "model",
+    "created": 1755815280,
+    "owned_by": "zai",
+    "upstream": "z-ai/glm-5.3-flash",
+    "context_window": 1000000,
+    "max_tokens": 131000,
+    "type": "language",
+    "name": "GLM 5.3 Flash (nvidia)",
+    "description": "GLM-5.3-Flash is Z.ai's native multimodal coding model, featuring 320B total parameters, 18B activated parameters, and a 1M-token context window. Its efficient hybrid attention architecture supports visual coding, tool use, and end-to-end professional workflows across code, browsers, documents, and graphical interfaces.",
+    "tags": [
+      "reasoning",
+      "tool-use",
+      "implicit-caching",
+      "vision",
+      "structured-output"
+    ],
+    "pricing": {
+      "prompt": "0.00000015",
+      "completion": "0.0000005",
+      "input_cache_read": "0.00000003"
+    },
+    "pricing_per_million": {
+      "input": 0.15,
+      "output": 0.5,
+      "cache_read": 0.03,
+      "currency": "USD",
+      "per": "1M tokens"
+    },
+    "released": 1787702400,
+    "attachment": false,
+    "reasoning": true
+  },
+  {
+    "id": "nv/moonshotai/kimi-k3",
+    "object": "model",
+    "created": 1755815280,
+    "owned_by": "moonshotai",
+    "upstream": "moonshotai/kimi-k3",
+    "context_window": 1000000,
+    "max_tokens": 131072,
+    "type": "language",
+    "name": "Kimi K3 (nvidia)",
+    "description": "Kimi’s flagship model for long-horizon coding and end-to-end knowledge work, with a 1M-token context window.",
+    "tags": [
+      "reasoning",
+      "tool-use",
+      "implicit-caching",
+      "file-input",
+      "vision"
+    ],
+    "pricing": {
+      "prompt": "0.000003",
+      "completion": "0.000015",
+      "input_cache_read": "0.0000003"
+    },
+    "pricing_per_million": {
+      "input": 3,
+      "output": 15,
+      "cache_read": 0.3,
+      "currency": "USD",
+      "per": "1M tokens"
+    },
+    "released": 1784160000,
+    "attachment": true,
+    "reasoning": true
+  },
+  {
+    "id": "oc/ling-3.0-flash-free",
+    "object": "model",
+    "created": 1755815280,
+    "owned_by": "inclusionai",
+    "upstream": "ling-3.0-flash-free",
+    "context_window": 256000,
+    "max_tokens": 256000,
+    "type": "language",
+    "name": "Ling 3.0 Flash",
+    "description": "Ling 3.0 Flash is designed with token efficiency and production-scale agentic inference as key priorities. Free tier served via opencode Zen.",
+    "tags": [
+      "reasoning",
+      "tool-use",
+      "implicit-caching"
+    ],
+    "pricing": {
+      "prompt": "0",
+      "completion": "0"
+    },
+    "pricing_per_million": {
+      "input": 0,
+      "output": 0,
+      "cache_read": 0,
+      "currency": "USD",
+      "per": "1M tokens"
+    },
+    "released": 1784764800
+  },
+  {
+    "id": "oc/mimo-v2.5-free",
+    "object": "model",
+    "created": 1755815280,
+    "owned_by": "xiaomi",
+    "upstream": "mimo-v2.5-free",
+    "context_window": 1050000,
+    "max_tokens": 131100,
+    "type": "language",
+    "name": "MiMo M2.5",
+    "description": "A native full-modal model supporting text, image, video, and audio understanding, with powerful Agent capabilities. Free tier served via opencode Zen.",
+    "tags": [
+      "reasoning",
+      "tool-use",
+      "implicit-caching",
+      "file-input",
+      "vision"
+    ],
+    "pricing": {
+      "prompt": "0.00000014",
+      "completion": "0.00000028",
+      "input_cache_read": "0.0000000028"
+    },
+    "pricing_per_million": {
+      "input": 0.14,
+      "output": 0.28,
+      "cache_read": 0.0028,
+      "currency": "USD",
+      "per": "1M tokens"
+    },
+    "released": 1776816000
+  },
+  {
+    "id": "oc/nemotron-3-ultra-free",
+    "object": "model",
+    "created": 1755815280,
+    "owned_by": "nvidia",
+    "upstream": "nemotron-3-ultra-free",
+    "context_window": 1000000,
+    "max_tokens": 65000,
+    "type": "language",
+    "name": "Nemotron 3 Ultra",
+    "description": "A 550B parameter (55B active) open reasoning model from NVIDIA, built for long-running agent workflows. Free tier served via opencode Zen.",
+    "tags": [
+      "reasoning",
+      "tool-use",
+      "implicit-caching"
+    ],
+    "pricing": {
+      "prompt": "0.0000006",
+      "completion": "0.0000024",
+      "input_cache_read": "0.00000012"
+    },
+    "pricing_per_million": {
+      "input": 0.6,
+      "output": 2.4,
+      "cache_read": 0.12,
+      "currency": "USD",
+      "per": "1M tokens"
+    },
+    "released": 1780531200
+  },
+  {
+    "id": "ol/glm-4.7",
+    "object": "model",
+    "created": 1755815280,
+    "owned_by": "zai",
+    "upstream": "glm-4.7",
+    "context_window": 200000,
+    "max_tokens": 120000,
+    "type": "language",
+    "name": "GLM 4.7 (ollama)",
+    "description": "GLM-4.7 is Z.ai’s latest flagship model, with major upgrades focused on two key areas: stronger coding capabilities and more stable multi-step reasoning and execution.",
+    "tags": [
+      "reasoning",
+      "tool-use",
+      "implicit-caching"
+    ],
+    "pricing": {
+      "prompt": "0.0000006",
+      "completion": "0.0000022",
+      "input_cache_read": "0.00000012"
+    },
+    "pricing_per_million": {
+      "input": 0.6,
+      "output": 2.2,
+      "cache_read": 0.12,
+      "currency": "USD",
+      "per": "1M tokens"
+    },
+    "released": 1766361600,
+    "attachment": false,
+    "reasoning": true
+  },
+  {
+    "id": "ol/minimax-m3",
+    "object": "model",
+    "created": 1755815280,
+    "owned_by": "minimax",
+    "upstream": "minimax-m3",
+    "context_window": 1000000,
+    "max_tokens": 1000000,
+    "type": "language",
+    "name": "MiniMax M3 (ollama)",
+    "description": "MiniMax-M3 is a frontier-class foundation model that unites the three capabilities defining today's frontier: a 1M-token con…ng and agentic performance, and native multimodality — the first open-weight model to deliver all three in a single system.",
+    "tags": [
+      "reasoning",
+      "tool-use",
+      "vision",
+      "file-input",
+      "implicit-caching"
+    ],
+    "pricing": {
+      "prompt": "0.0000003",
+      "completion": "0.0000012",
+      "input_cache_read": "0.00000006"
+    },
+    "pricing_per_million": {
+      "input": 0.3,
+      "output": 1.2,
+      "cache_read": 0.06,
+      "currency": "USD",
+      "per": "1M tokens",
+      "input_tiers": [
+        {
+          "cost": 0.3,
+          "min": 0,
+          "max": 512000
+        },
+        {
+          "cost": 1.2,
+          "min": 512000
+        }
+      ],
+      "output_tiers": [
+        {
+          "cost": 1.2,
+          "min": 0,
+          "max": 512000
+        },
+        {
+          "cost": 4.8,
+          "min": 512000
+        }
+      ],
+      "input_cache_read_tiers": [
+        {
+          "cost": 0.06,
+          "min": 0,
+          "max": 512000
+        },
+        {
+          "cost": 0.24,
+          "min": 512000
+        }
+      ]
+    },
+    "released": 1780185600,
+    "attachment": true,
+    "reasoning": true
+  },
+  {
+    "id": "ol/nemotron-3-ultra",
+    "object": "model",
+    "created": 1755815280,
+    "owned_by": "nvidia",
+    "upstream": "nemotron-3-ultra",
+    "context_window": 1000000,
+    "max_tokens": 65000,
+    "type": "language",
+    "name": "Nemotron 3 Ultra (ollama)",
+    "description": "A 550B parameter (55B active) open reasoning model from NVIDIA, built for long-running agent workflows. Free tier served via opencode Zen.",
+    "tags": [
+      "reasoning",
+      "tool-use",
+      "implicit-caching"
+    ],
+    "pricing": {
+      "prompt": "0.0000006",
+      "completion": "0.0000024",
+      "input_cache_read": "0.00000012"
+    },
+    "pricing_per_million": {
+      "input": 0.6,
+      "output": 2.4,
+      "cache_read": 0.12,
+      "currency": "USD",
+      "per": "1M tokens"
+    },
+    "released": 1780531200,
+    "attachment": false,
+    "reasoning": true
+  },
+  {
+    "id": "or/inclusionai/ling-3.0-flash-free",
+    "object": "model",
+    "created": 1755815280,
+    "owned_by": "inclusionai",
+    "upstream": "inclusionai/ling-3.0-flash:free",
+    "context_window": 256000,
+    "max_tokens": 256000,
+    "type": "language",
+    "name": "Ling 3.0 Flash",
+    "description": "Ling 3.0 Flash is designed with token efficiency and production-scale agentic inference as key priorities. Free tier served via opencode Zen.",
+    "tags": [
+      "reasoning",
+      "tool-use",
+      "implicit-caching"
+    ],
+    "pricing": {
+      "prompt": "0",
+      "completion": "0"
+    },
+    "pricing_per_million": {
+      "input": 0,
+      "output": 0,
+      "cache_read": 0,
+      "currency": "USD",
+      "per": "1M tokens"
+    },
+    "released": 1784764800,
+    "attachment": false,
+    "reasoning": false
+  },
+  {
+    "id": "or/nvidia/nemotron-3-ultra-550b-a55b",
+    "object": "model",
+    "created": 1755815280,
+    "owned_by": "nvidia",
+    "upstream": "nvidia/nemotron-3-ultra-550b-a55b:free",
+    "context_window": 1000000,
+    "max_tokens": 65000,
+    "type": "language",
+    "name": "Nemotron 3 Ultra",
+    "description": "A 550B parameter (55B active) open reasoning model from NVIDIA, built for long-running agent workflows. Free tier served via opencode Zen.",
+    "tags": [
+      "reasoning",
+      "tool-use",
+      "implicit-caching"
+    ],
+    "pricing": {
+      "prompt": "0.0000006",
+      "completion": "0.0000024",
+      "input_cache_read": "0.00000012"
+    },
+    "pricing_per_million": {
+      "input": 0.6,
+      "output": 2.4,
+      "cache_read": 0.12,
+      "currency": "USD",
+      "per": "1M tokens"
+    },
+    "released": 1780531200,
+    "attachment": false,
+    "reasoning": false
+  },
+  {
+    "id": "or/poolside/laguna-s-2.1",
+    "object": "model",
+    "created": 1755815280,
+    "owned_by": "poolside",
+    "upstream": "poolside/laguna-s-2.1:free",
+    "context_window": 1000000,
+    "max_tokens": 131072,
+    "type": "language",
+    "name": "Laguna S 2.1",
+    "description": "Laguna S 2.1 is Poolside's new open-weight model for agentic coding and long-horizon work. Free tier served via opencode Zen.",
+    "tags": [
+      "reasoning",
+      "tool-use"
+    ],
+    "pricing": {
+      "prompt": "0.0000001",
+      "completion": "0.0000002",
+      "input_cache_read": "0.00000001"
+    },
+    "pricing_per_million": {
+      "input": 0.09999999999999999,
+      "output": 0.19999999999999998,
+      "cache_read": 0.01,
+      "currency": "USD",
+      "per": "1M tokens"
+    },
+    "released": 1784505600,
+    "attachment": false,
+    "reasoning": false
+  },
+  {
+    "id": "ps/poolside/laguna-m.1",
+    "object": "model",
+    "created": 1777334400,
+    "owned_by": "poolside",
+    "upstream": "poolside/laguna-m.1",
+    "context_window": 262144,
+    "max_tokens": 32768,
+    "type": "language",
+    "name": "Laguna M.1 (poolside)",
+    "description": "Poolside's flagship agentic coding model for long-horizon work",
+    "tags": [
+      "reasoning",
+      "tool-use",
+      "temperature"
+    ],
+    "pricing": {
+      "prompt": "0.0000002",
+      "completion": "0.0000004"
+    },
+    "pricing_per_million": {
+      "input": 0.2,
+      "output": 0.4,
+      "cache_read": 0,
+      "currency": "USD",
+      "per": "1M tokens"
+    },
+    "released": 1777334400,
+    "attachment": false,
+    "reasoning": true
+  },
+  {
+    "id": "ps/poolside/laguna-s-2.1",
+    "object": "model",
+    "created": 1755815280,
+    "owned_by": "poolside",
+    "upstream": "poolside/laguna-s-2.1",
+    "context_window": 1000000,
+    "max_tokens": 131072,
+    "type": "language",
+    "name": "Laguna S 2.1 (poolside)",
+    "description": "Laguna S 2.1 is Poolside's new open-weight model for agentic coding and long-horizon work. Free tier served via opencode Zen.",
+    "tags": [
+      "reasoning",
+      "tool-use"
+    ],
+    "pricing": {
+      "prompt": "0.0000001",
+      "completion": "0.0000002",
+      "input_cache_read": "0.00000001"
+    },
+    "pricing_per_million": {
+      "input": 0.1,
+      "output": 0.2,
+      "cache_read": 0.01,
+      "currency": "USD",
+      "per": "1M tokens"
+    },
+    "released": 1784505600,
+    "attachment": false,
+    "reasoning": true
+  },
+  {
+    "id": "ps/poolside/laguna-xs-2.1",
+    "object": "model",
+    "created": 1782950400,
+    "owned_by": "poolside",
+    "upstream": "poolside/laguna-xs-2.1",
+    "context_window": 262144,
+    "max_tokens": 32768,
+    "type": "language",
+    "name": "Laguna XS 2.1 (poolside)",
+    "description": "Agentic coding model from Poolside in the XS size class for local deployment",
+    "tags": [
+      "reasoning",
+      "tool-use",
+      "temperature"
+    ],
+    "pricing": {
+      "prompt": "0.0000001",
+      "completion": "0.0000002"
+    },
+    "pricing_per_million": {
+      "input": 0.1,
+      "output": 0.2,
+      "cache_read": 0,
+      "currency": "USD",
+      "per": "1M tokens"
+    },
+    "released": 1782950400,
+    "attachment": false,
+    "reasoning": true
+  },
+  {
+    "id": "sf/step-3.7-flash",
+    "object": "model",
+    "created": 1755815280,
+    "owned_by": "stepfun",
+    "upstream": "step-3.7-flash",
+    "context_window": 256000,
+    "max_tokens": 256000,
+    "type": "language",
+    "name": "Step3.7 Flash (stepfun)",
+    "description": "StepFun’s flagship multimodal reasoning model. Powered by a 198B-parameter / 11B-activation sparse MoE architecture, with native support for image and video understanding.",
+    "tags": [
+      "implicit-caching",
+      "reasoning",
+      "tool-use",
+      "vision"
+    ],
+    "pricing": {
+      "prompt": "0.0000002",
+      "completion": "0.00000115",
+      "input_cache_read": "0.00000004"
+    },
+    "pricing_per_million": {
+      "input": 0.2,
+      "output": 1.15,
+      "cache_read": 0.04,
+      "currency": "USD",
+      "per": "1M tokens"
+    },
+    "released": 1779926400,
+    "attachment": true,
+    "reasoning": true
+  },
+  {
+    "id": "sl/MiniMaxAI/MiniMax-M3",
+    "object": "model",
+    "created": 1755815280,
+    "owned_by": "minimax",
+    "upstream": "MiniMaxAI/MiniMax-M3",
+    "context_window": 1000000,
+    "max_tokens": 1000000,
+    "type": "language",
+    "name": "MiniMax M3 (siliconflow)",
+    "description": "MiniMax-M3 is a frontier-class foundation model that unites the three capabilities defining today's frontier: a 1M-token con…ng and agentic performance, and native multimodality — the first open-weight model to deliver all three in a single system.",
+    "tags": [
+      "reasoning",
+      "tool-use",
+      "vision",
+      "file-input",
+      "implicit-caching"
+    ],
+    "pricing": {
+      "prompt": "0.0000003",
+      "completion": "0.0000012",
+      "input_cache_read": "0.00000006"
+    },
+    "pricing_per_million": {
+      "input": 0.3,
+      "output": 1.2,
+      "cache_read": 0.06,
+      "currency": "USD",
+      "per": "1M tokens",
+      "input_tiers": [
+        {
+          "cost": 0.3,
+          "min": 0,
+          "max": 512000
+        },
+        {
+          "cost": 1.2,
+          "min": 512000
+        }
+      ],
+      "output_tiers": [
+        {
+          "cost": 1.2,
+          "min": 0,
+          "max": 512000
+        },
+        {
+          "cost": 4.8,
+          "min": 512000
+        }
+      ],
+      "input_cache_read_tiers": [
+        {
+          "cost": 0.06,
+          "min": 0,
+          "max": 512000
+        },
+        {
+          "cost": 0.24,
+          "min": 512000
+        }
+      ]
+    },
+    "released": 1780185600,
+    "attachment": true,
+    "reasoning": true
+  },
+  {
+    "id": "sl/deepseek-ai/DeepSeek-V4-Pro",
+    "object": "model",
+    "created": 1755815280,
+    "owned_by": "deepseek",
+    "upstream": "deepseek-ai/DeepSeek-V4-Pro",
+    "context_window": 1000000,
+    "max_tokens": 384000,
+    "type": "language",
+    "name": "DeepSeek V4 Pro (siliconflow)",
+    "description": "DeepSeek-V4 series incorporate several key upgrades in architecture and optimization: (1) a hybrid attention architecture th…nhance conventional residual connections; (3)\\nand the Muon optimizer for faster convergence and greater training stability",
+    "tags": [
+      "reasoning",
+      "tool-use",
+      "implicit-caching"
+    ],
+    "pricing": {
+      "prompt": "0.000000435",
+      "completion": "0.00000087",
+      "input_cache_read": "0.0000000036"
+    },
+    "pricing_per_million": {
+      "input": 0.435,
+      "output": 0.87,
+      "cache_read": 0.0036,
+      "currency": "USD",
+      "per": "1M tokens"
+    },
+    "released": 1776902400,
+    "attachment": false,
+    "reasoning": true
+  },
+  {
+    "id": "sl/tencent/Hy3",
+    "object": "model",
+    "created": 1776643200,
+    "owned_by": "tencent",
+    "upstream": "tencent/Hy3",
+    "context_window": 262144,
+    "max_tokens": 262144,
+    "type": "language",
+    "name": "Hy3 (siliconflow)",
+    "description": "Built for real-world business scenarios, Hy3 features a 295B/21B active MoE architecture, native 256K context support, and three reasoning modes. Free tier served via opencode Zen.",
+    "tags": [
+      "reasoning",
+      "tool-use",
+      "temperature"
+    ],
+    "pricing": {
+      "prompt": "0.00000014",
+      "completion": "0.00000058"
+    },
+    "pricing_per_million": {
+      "input": 0.14,
+      "output": 0.58,
+      "cache_read": 0,
+      "currency": "USD",
+      "per": "1M tokens"
+    },
+    "released": 1776643200,
+    "attachment": false,
+    "reasoning": true
+  },
+  {
+    "id": "sl/zai-org/GLM-5.2",
+    "object": "model",
+    "created": 1755815280,
+    "owned_by": "zai",
+    "upstream": "zai-org/GLM-5.2",
+    "context_window": 1040000,
+    "max_tokens": 128000,
+    "type": "language",
+    "name": "GLM 5.2 (siliconflow)",
+    "description": "GLM-5.2 delivers powerful coding capabilities, usable 1M-context support, and continued strengths in long-horizon tasks.",
+    "tags": [
+      "reasoning",
+      "tool-use",
+      "implicit-caching"
+    ],
+    "pricing": {
+      "prompt": "0.0000014",
+      "completion": "0.0000044",
+      "input_cache_read": "0.00000026"
+    },
+    "pricing_per_million": {
+      "input": 1.4,
+      "output": 4.4,
+      "cache_read": 0.26,
+      "currency": "USD",
+      "per": "1M tokens"
+    },
+    "released": 1781568000,
+    "attachment": false,
+    "reasoning": true
+  },
+  {
+    "id": "tr/moonshotai/kimi-k3-free",
+    "object": "model",
+    "created": 1755815280,
+    "owned_by": "moonshotai",
+    "upstream": "moonshotai/kimi-k3-free",
+    "context_window": 1000000,
+    "max_tokens": 131072,
+    "type": "language",
+    "name": "Kimi K3 Free (tokenrouter)",
+    "description": "Kimi K3 free tier served via zenmux. Moonshot's flagship model for long-horizon coding and end-to-end knowledge work, with a 1M-token context window.",
+    "tags": [
+      "reasoning",
+      "tool-use",
+      "implicit-caching",
+      "file-input",
+      "vision"
+    ],
+    "pricing": {
+      "prompt": "0.000003",
+      "completion": "0.000015",
+      "input_cache_read": "0.0000003"
+    },
+    "pricing_per_million": {
+      "input": 3,
+      "output": 15,
+      "cache_read": 0.3,
+      "currency": "USD",
+      "per": "1M tokens"
+    },
+    "released": 1784160000,
+    "attachment": true,
+    "reasoning": true
+  },
+  {
+    "id": "tr/z-ai/glm-5.2-free",
+    "object": "model",
+    "created": 1755815280,
+    "owned_by": "zai",
+    "upstream": "z-ai/glm-5.2-free",
+    "context_window": 1040000,
+    "max_tokens": 128000,
+    "type": "language",
+    "name": "GLM 5.2 (tokenrouter)",
+    "description": "GLM-5.2 delivers powerful coding capabilities, usable 1M-context support, and continued strengths in long-horizon tasks.",
+    "tags": [
+      "reasoning",
+      "tool-use",
+      "implicit-caching"
+    ],
+    "pricing": {
+      "prompt": "0.0000014",
+      "completion": "0.0000044",
+      "input_cache_read": "0.00000026"
+    },
+    "pricing_per_million": {
+      "input": 1.4,
+      "output": 4.4,
+      "cache_read": 0.26,
+      "currency": "USD",
+      "per": "1M tokens"
+    },
+    "released": 1781568000,
+    "attachment": false,
+    "reasoning": true
+  },
+  {
+    "id": "vl/alibaba/qwen3.8-max",
+    "object": "model",
+    "created": 1755815280,
+    "owned_by": "alibaba",
+    "upstream": "alibaba/qwen3.8-max",
+    "context_window": 1000000,
+    "max_tokens": 128000,
+    "type": "language",
+    "name": "Qwen 3.8 Max (vercel)",
+    "description": "Qwen 3.8 Max is a 2.4-trillion-parameter MoE model delivering a comprehensive leap in coding and professional work. Autonomously codes and delivers complete projects spanning 10+ days. Handles hundreds of specialized tasks across legal, financial, design, and other professional domains, producing production-grade results end-to-end in a single conversation. Native visual understanding runs through the full cycle of planning, execution, and verification, enabling deep semantic analysis of ultra-long documents and extended video content. In long-horizon tasks, plans autonomously, iterates through closed feedback loops, and continuously evolves.",
+    "tags": [
+      "reasoning",
+      "tool-use",
+      "implicit-caching",
+      "vision"
+    ],
+    "pricing": {
+      "prompt": "0.000002",
+      "completion": "0.000006",
+      "input_cache_read": "0.00000025"
+    },
+    "pricing_per_million": {
+      "input": 2,
+      "output": 6,
+      "cache_read": 0.25,
+      "currency": "USD",
+      "per": "1M tokens"
+    },
+    "released": 1785628800,
+    "attachment": true,
+    "reasoning": true
+  },
+  {
+    "id": "vl/kwaipilot/kat-coder-air-v2.5",
+    "object": "model",
+    "created": 1755815280,
+    "owned_by": "kwaipilot",
+    "upstream": "kwaipilot/kat-coder-air-v2.5",
+    "context_window": 256000,
+    "max_tokens": 80000,
+    "type": "language",
+    "name": "Kat Coder Air V2.5 (vercel)",
+    "description": "Fast response version of Kat Coder V2.5 optimized for Agent and Claw use cases.",
+    "tags": [
+      "reasoning",
+      "tool-use",
+      "implicit-caching"
+    ],
+    "pricing": {
+      "prompt": "0.00000015",
+      "completion": "0.0000006",
+      "input_cache_read": "0.00000003"
+    },
+    "pricing_per_million": {
+      "input": 0.15,
+      "output": 0.6,
+      "cache_read": 0.03,
+      "currency": "USD",
+      "per": "1M tokens"
+    },
+    "released": 1783641600,
+    "attachment": false,
+    "reasoning": true
+  },
+  {
+    "id": "vl/kwaipilot/kat-coder-pro-v2",
+    "object": "model",
+    "created": 1755815280,
+    "owned_by": "kwaipilot",
+    "upstream": "kwaipilot/kat-coder-pro-v2",
+    "context_window": 256000,
+    "max_tokens": 256000,
+    "type": "language",
+    "name": "Kat Coder Pro V2 (vercel)",
+    "description": "A high-performance edition designed for complex enterprise projects and SaaS integration.",
+    "tags": [
+      "tool-use",
+      "reasoning",
+      "implicit-caching"
+    ],
+    "pricing": {
+      "prompt": "0.0000003",
+      "completion": "0.0000012",
+      "input_cache_read": "0.00000006"
+    },
+    "pricing_per_million": {
+      "input": 0.3,
+      "output": 1.2,
+      "cache_read": 0.06,
+      "currency": "USD",
+      "per": "1M tokens"
+    },
+    "released": 1774569600,
+    "attachment": false,
+    "reasoning": true
+  },
+  {
+    "id": "vl/kwaipilot/kat-coder-pro-v2.5",
+    "object": "model",
+    "created": 1755815280,
+    "owned_by": "kwaipilot",
+    "upstream": "kwaipilot/kat-coder-pro-v2.5",
+    "context_window": 256000,
+    "max_tokens": 80000,
+    "type": "language",
+    "name": "Kat Coder Pro V2.5 (vercel)",
+    "description": "KAT-Coder-V2.5 is a coding-focused agentic model trained to act autonomously inside real, executable repositories rather than as a single-turn code generator.",
+    "tags": [
+      "reasoning",
+      "tool-use",
+      "implicit-caching"
+    ],
+    "pricing": {
+      "prompt": "0.00000074",
+      "completion": "0.00000296",
+      "input_cache_read": "0.00000015"
+    },
+    "pricing_per_million": {
+      "input": 0.74,
+      "output": 2.96,
+      "cache_read": 0.15,
+      "currency": "USD",
+      "per": "1M tokens"
+    },
+    "released": 1783641600,
+    "attachment": false,
+    "reasoning": true
+  },
+  {
+    "id": "vl/meta/muse-spark-1.2-contributor",
+    "object": "model",
+    "created": 1755815280,
+    "owned_by": "meta",
+    "upstream": "meta/muse-spark-1.2-contributor",
+    "context_window": 1048576,
+    "max_tokens": 1048576,
+    "type": "language",
+    "name": "Muse Spark 1.2 Contributor (vercel)",
+    "description": "A coding-optimized model with pricing designed for builders. Same model, same capabilities — up to 95% less than Standard. Your inputs and outputs are used to train and improve Meta's AI models.",
+    "tags": [
+      "reasoning",
+      "tool-use",
+      "implicit-caching",
+      "file-input",
+      "vision"
+    ],
+    "pricing": {
+      "prompt": "0.0000001",
+      "completion": "0.0000002",
+      "input_cache_read": "0.000000002"
+    },
+    "pricing_per_million": {
+      "input": 0.1,
+      "output": 0.2,
+      "cache_read": 0.002,
+      "currency": "USD",
+      "per": "1M tokens"
+    },
+    "released": 1785888000,
+    "attachment": true,
+    "reasoning": true
+  },
+  {
+    "id": "vl/minimax/minimax-m3",
+    "object": "model",
+    "created": 1755815280,
+    "owned_by": "minimax",
+    "upstream": "minimax/minimax-m3",
+    "context_window": 1000000,
+    "max_tokens": 1000000,
+    "type": "language",
+    "name": "MiniMax M3 (vercel)",
+    "description": "MiniMax-M3 is a frontier-class foundation model that unites the three capabilities defining today's frontier: a 1M-token con…ng and agentic performance, and native multimodality — the first open-weight model to deliver all three in a single system.",
+    "tags": [
+      "reasoning",
+      "tool-use",
+      "vision",
+      "file-input",
+      "implicit-caching"
+    ],
+    "pricing": {
+      "prompt": "0.0000003",
+      "completion": "0.0000012",
+      "input_cache_read": "0.00000006"
+    },
+    "pricing_per_million": {
+      "input": 0.3,
+      "output": 1.2,
+      "cache_read": 0.06,
+      "currency": "USD",
+      "per": "1M tokens",
+      "input_tiers": [
+        {
+          "cost": 0.3,
+          "min": 0,
+          "max": 512000
+        },
+        {
+          "cost": 1.2,
+          "min": 512000
+        }
+      ],
+      "output_tiers": [
+        {
+          "cost": 1.2,
+          "min": 0,
+          "max": 512000
+        },
+        {
+          "cost": 4.8,
+          "min": 512000
+        }
+      ],
+      "input_cache_read_tiers": [
+        {
+          "cost": 0.06,
+          "min": 0,
+          "max": 512000
+        },
+        {
+          "cost": 0.24,
+          "min": 512000
+        }
+      ]
+    },
+    "released": 1780185600,
+    "attachment": true,
+    "reasoning": true
+  },
+  {
+    "id": "vl/moonshotai/kimi-k2.7-code",
+    "object": "model",
+    "created": 1755815280,
+    "owned_by": "moonshotai",
+    "upstream": "moonshotai/kimi-k2.7-code",
+    "context_window": 256000,
+    "max_tokens": 32768,
+    "type": "language",
+    "name": "Kimi K2.7 Code (vercel)",
+    "description": "Kimi-K2.7-Code is a coding model from Moonshot AI. It has  improved coding & agent performance over K2.6, more reasoning efficiency with less overthinking, and improved instruction following for long-horizon coding.",
+    "tags": [
+      "reasoning",
+      "tool-use",
+      "implicit-caching",
+      "file-input",
+      "vision"
+    ],
+    "pricing": {
+      "prompt": "0.00000095",
+      "completion": "0.000004",
+      "input_cache_read": "0.00000019"
+    },
+    "pricing_per_million": {
+      "input": 0.95,
+      "output": 4,
+      "cache_read": 0.19,
+      "currency": "USD",
+      "per": "1M tokens"
+    },
+    "released": 1781222400,
+    "attachment": true,
+    "reasoning": true
+  },
+  {
+    "id": "vl/moonshotai/kimi-k2.7-code-highspeed",
+    "object": "model",
+    "created": 1755815280,
+    "owned_by": "moonshotai",
+    "upstream": "moonshotai/kimi-k2.7-code-highspeed",
+    "context_window": 262144,
+    "max_tokens": 32768,
+    "type": "language",
+    "name": "Kimi K2.7 Code High Speed (vercel)",
+    "description": "Kimi K2.7 Code HighSpeed is the high-speed version of Kimi K2.7 Code, the same model as Kimi K2.7 Code, but with an output s… approximately 180 Tokens/s and up to 260 Tokens/s in short context scenarios, delivering a more extreme coding experience.",
+    "tags": [
+      "reasoning",
+      "tool-use",
+      "implicit-caching",
+      "file-input",
+      "vision"
+    ],
+    "pricing": {
+      "prompt": "0.0000019",
+      "completion": "0.000008",
+      "input_cache_read": "0.00000038"
+    },
+    "pricing_per_million": {
+      "input": 1.9,
+      "output": 8,
+      "cache_read": 0.38,
+      "currency": "USD",
+      "per": "1M tokens"
+    },
+    "released": 1781481600,
+    "attachment": true,
+    "reasoning": true
+  },
+  {
+    "id": "vl/moonshotai/kimi-k3",
+    "object": "model",
+    "created": 1755815280,
+    "owned_by": "moonshotai",
+    "upstream": "moonshotai/kimi-k3",
+    "context_window": 1000000,
+    "max_tokens": 131072,
+    "type": "language",
+    "name": "Kimi K3 (vercel)",
+    "description": "Kimi’s flagship model for long-horizon coding and end-to-end knowledge work, with a 1M-token context window.",
+    "tags": [
+      "reasoning",
+      "tool-use",
+      "implicit-caching",
+      "file-input",
+      "vision"
+    ],
+    "pricing": {
+      "prompt": "0.000003",
+      "completion": "0.000015",
+      "input_cache_read": "0.0000003"
+    },
+    "pricing_per_million": {
+      "input": 3,
+      "output": 15,
+      "cache_read": 0.3,
+      "currency": "USD",
+      "per": "1M tokens"
+    },
+    "released": 1784160000,
+    "attachment": true,
+    "reasoning": true
+  },
+  {
+    "id": "vl/nvidia/nemotron-3-ultra-550b-a55b",
+    "object": "model",
+    "created": 1755815280,
+    "owned_by": "nvidia",
+    "upstream": "nvidia/nemotron-3-ultra-550b-a55b",
+    "context_window": 1000000,
+    "max_tokens": 65000,
+    "type": "language",
+    "name": "Nemotron 3 Ultra (vercel)",
+    "description": "A 550B parameter (55B active) open reasoning model from NVIDIA, built for long-running agent workflows. Free tier served via opencode Zen.",
+    "tags": [
+      "reasoning",
+      "tool-use",
+      "implicit-caching"
+    ],
+    "pricing": {
+      "prompt": "0.0000006",
+      "completion": "0.0000024",
+      "input_cache_read": "0.00000012"
+    },
+    "pricing_per_million": {
+      "input": 0.6,
+      "output": 2.4,
+      "cache_read": 0.12,
+      "currency": "USD",
+      "per": "1M tokens"
+    },
+    "released": 1780531200,
+    "attachment": false,
+    "reasoning": true
+  },
+  {
+    "id": "vl/sakana/fugu-ultra",
+    "object": "model",
+    "created": 1755815280,
+    "owned_by": "sakana",
+    "upstream": "sakana/fugu-ultra",
+    "context_window": 1000000,
+    "max_tokens": 1000000,
+    "type": "language",
+    "name": "Fugu Ultra (vercel)",
+    "description": "Fugu Ultra coordinates a deeper pool of expert agents to maximize answer quality on hard, high-stakes problems. Fugu Ultra focuses on maximizing performance, for a higher cost. It routes between one to three agents, depending on the problem.",
+    "tags": [
+      "vision",
+      "tool-use",
+      "reasoning"
+    ],
+    "pricing": {
+      "prompt": "0.000005",
+      "completion": "0.00003",
+      "input_cache_read": "0.0000005"
+    },
+    "pricing_per_million": {
+      "input": 5,
+      "output": 30,
+      "cache_read": 0.5,
+      "currency": "USD",
+      "per": "1M tokens",
+      "input_tiers": [
+        {
+          "cost": 5,
+          "min": 0,
+          "max": 272001
+        },
+        {
+          "cost": 10,
+          "min": 272001
+        }
+      ],
+      "output_tiers": [
+        {
+          "cost": 30,
+          "min": 0,
+          "max": 272001
+        },
+        {
+          "cost": 45,
+          "min": 272001
+        }
+      ],
+      "input_cache_read_tiers": [
+        {
+          "cost": 0.5,
+          "min": 0,
+          "max": 272001
+        },
+        {
+          "cost": 1,
+          "min": 272001
+        }
+      ]
+    },
+    "released": 1782000000,
+    "attachment": true,
+    "reasoning": true
+  },
+  {
+    "id": "vl/stepfun/step-3.7-flash",
+    "object": "model",
+    "created": 1755815280,
+    "owned_by": "stepfun",
+    "upstream": "stepfun/step-3.7-flash",
+    "context_window": 256000,
+    "max_tokens": 256000,
+    "type": "language",
+    "name": "Step3.7 Flash (vercel)",
+    "description": "StepFun’s flagship multimodal reasoning model. Powered by a 198B-parameter / 11B-activation sparse MoE architecture, with native support for image and video understanding.",
+    "tags": [
+      "implicit-caching",
+      "reasoning",
+      "tool-use",
+      "vision"
+    ],
+    "pricing": {
+      "prompt": "0.0000002",
+      "completion": "0.00000115",
+      "input_cache_read": "0.00000004"
+    },
+    "pricing_per_million": {
+      "input": 0.2,
+      "output": 1.15,
+      "cache_read": 0.04,
+      "currency": "USD",
+      "per": "1M tokens"
+    },
+    "released": 1779926400,
+    "attachment": true,
+    "reasoning": true
+  },
+  {
+    "id": "vl/xai/grok-build-0.1",
+    "object": "model",
+    "created": 1755815280,
+    "owned_by": "xai",
+    "upstream": "xai/grok-build-0.1",
+    "context_window": 256000,
+    "max_tokens": 256000,
+    "type": "language",
+    "name": "Grok Build 0.1 (vercel)",
+    "description": "xAI's fast coding model trained specifically for agentic coding.",
+    "tags": [
+      "reasoning",
+      "implicit-caching",
+      "vision",
+      "tool-use",
+      "web-search"
+    ],
+    "pricing": {
+      "prompt": "0.000001",
+      "completion": "0.000002",
+      "input_cache_read": "0.0000002"
+    },
+    "pricing_per_million": {
+      "input": 1,
+      "output": 2,
+      "cache_read": 0.2,
+      "currency": "USD",
+      "per": "1M tokens",
+      "input_tiers": [
+        {
+          "cost": 1,
+          "min": 0,
+          "max": 200001
+        },
+        {
+          "cost": 2,
+          "min": 200001
+        }
+      ],
+      "output_tiers": [
+        {
+          "cost": 2,
+          "min": 0,
+          "max": 200001
+        },
+        {
+          "cost": 4,
+          "min": 200001
+        }
+      ],
+      "input_cache_read_tiers": [
+        {
+          "cost": 0.2,
+          "min": 0,
+          "max": 200001
+        },
+        {
+          "cost": 0.4,
+          "min": 200001
+        }
+      ],
+      "web_search": 5
+    },
+    "released": 1779235200,
+    "attachment": true,
+    "reasoning": true
+  },
+  {
+    "id": "vl/xiaomi/mimo-v2.5-pro",
+    "object": "model",
+    "created": 1755815280,
+    "owned_by": "xiaomi",
+    "upstream": "xiaomi/mimo-v2.5-pro",
+    "context_window": 1050000,
+    "max_tokens": 131000,
+    "type": "language",
+    "name": "MiMo V2.5 Pro (vercel)",
+    "description": "MiMo V2.5 Pro delivers significant improvements over its predecessor, MiMo-V2-Pro, in general agentic capabilities, complex …xture-of-Experts model with 42B active parameters, built on a hybrid-attention architecture with a 1M-token context window.",
+    "tags": [
+      "reasoning",
+      "tool-use",
+      "file-input",
+      "implicit-caching"
+    ],
+    "pricing": {
+      "prompt": "0.000000435",
+      "completion": "0.00000087",
+      "input_cache_read": "0.0000000036"
+    },
+    "pricing_per_million": {
+      "input": 0.435,
+      "output": 0.87,
+      "cache_read": 0.0036,
+      "currency": "USD",
+      "per": "1M tokens"
+    },
+    "released": 1776816000,
+    "attachment": true,
+    "reasoning": true
+  },
+  {
+    "id": "vl/zai/glm-5.2",
+    "object": "model",
+    "created": 1755815280,
+    "owned_by": "zai",
+    "upstream": "zai/glm-5.2",
+    "context_window": 1040000,
+    "max_tokens": 128000,
+    "type": "language",
+    "name": "GLM 5.2 (vercel)",
+    "description": "GLM-5.2 delivers powerful coding capabilities, usable 1M-context support, and continued strengths in long-horizon tasks.",
+    "tags": [
+      "reasoning",
+      "tool-use",
+      "implicit-caching"
+    ],
+    "pricing": {
+      "prompt": "0.0000014",
+      "completion": "0.0000044",
+      "input_cache_read": "0.00000026"
+    },
+    "pricing_per_million": {
+      "input": 1.4,
+      "output": 4.4,
+      "cache_read": 0.26,
+      "currency": "USD",
+      "per": "1M tokens"
+    },
+    "released": 1781568000,
+    "attachment": false,
+    "reasoning": true
+  },
+  {
+    "id": "wb/zai-org/GLM-5.2",
+    "object": "model",
+    "created": 1755815280,
+    "owned_by": "zai",
+    "upstream": "zai-org/GLM-5.2",
+    "context_window": 1040000,
+    "max_tokens": 128000,
+    "type": "language",
+    "name": "GLM 5.2 (wandb)",
+    "description": "GLM-5.2 delivers powerful coding capabilities, usable 1M-context support, and continued strengths in long-horizon tasks.",
+    "tags": [
+      "reasoning",
+      "tool-use",
+      "implicit-caching"
+    ],
+    "pricing": {
+      "prompt": "0.00000076",
+      "completion": "0.00000242",
+      "input_cache_read": "0.00000014"
+    },
+    "pricing_per_million": {
+      "input": 0.76,
+      "output": 2.42,
+      "cache_read": 0.14,
+      "currency": "USD",
+      "per": "1M tokens"
+    },
+    "released": 1781568000,
+    "attachment": false,
+    "reasoning": true
+  },
+  {
+    "id": "zm/moonshotai/kimi-k3-free",
+    "object": "model",
+    "created": 1755815280,
+    "owned_by": "moonshotai",
+    "upstream": "moonshotai/kimi-k3-free",
+    "context_window": 1000000,
+    "max_tokens": 131072,
+    "type": "language",
+    "name": "Kimi K3 Free",
+    "description": "Kimi K3 free tier served via zenmux. Moonshot's flagship model for long-horizon coding and end-to-end knowledge work, with a 1M-token context window.",
+    "tags": [
+      "reasoning",
+      "tool-use",
+      "implicit-caching",
+      "file-input",
+      "vision"
+    ],
+    "pricing": {
+      "prompt": "0.000003",
+      "completion": "0.000015",
+      "input_cache_read": "0.0000003"
+    },
+    "pricing_per_million": {
+      "input": 3,
+      "output": 15,
+      "cache_read": 0.3,
+      "currency": "USD",
+      "per": "1M tokens"
+    },
+    "released": 1784160000,
+    "attachment": false,
+    "reasoning": true
+  }
+]

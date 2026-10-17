@@ -1,0 +1,435 @@
+package server
+
+import (
+	"log"
+	"strconv"
+	"sync"
+	"time"
+)
+
+// tickAgg is one tick of activity for the alert aggregator. P50/P95/P99
+// are computed per-tick from the drained latency samples.
+type tickAgg struct {
+	TS        int64
+	Req       int64
+	Err       int64
+	Failover  int64
+	TokIn     int64
+	TokOut    int64
+	TokCache  int64
+	Cost      float64
+	LatSumMs  float64
+	LatN      int64
+	P50Ms     float64
+	P95Ms     float64
+	P99Ms     float64
+	TTFTSumMs float64
+	TTFTN     int64
+	LatHist   [len(latBuckets) + 1]uint64
+	TTFTHist  [len(latBuckets) + 1]uint64
+}
+
+func (t tickAgg) LatAvgMs() float64 {
+	if t.LatN > 0 {
+		return t.LatSumMs / float64(t.LatN)
+	}
+	return 0
+}
+
+func (t tickAgg) TTFTAvgMs() float64 {
+	if t.TTFTN > 0 {
+		return t.TTFTSumMs / float64(t.TTFTN)
+	}
+	return 0
+}
+
+func (t *tickAgg) merge(o tickAgg) {
+	// Histograms are additive; percentile estimates are derived only after merge.
+	t.Req += o.Req
+	t.Err += o.Err
+	t.Failover += o.Failover
+	t.TokIn += o.TokIn
+	t.TokOut += o.TokOut
+	t.TokCache += o.TokCache
+	t.Cost += o.Cost
+	t.LatSumMs += o.LatSumMs
+	t.LatN += o.LatN
+	t.TTFTSumMs += o.TTFTSumMs
+	t.TTFTN += o.TTFTN
+	for i, v := range o.LatHist {
+		t.LatHist[i] += v
+	}
+	for i, v := range o.TTFTHist {
+		t.TTFTHist[i] += v
+	}
+	t.P50Ms = histogramPercentile(t.LatHist, 50)
+	t.P95Ms = histogramPercentile(t.LatHist, 95)
+	t.P99Ms = histogramPercentile(t.LatHist, 99)
+	if o.TS > t.TS {
+		t.TS = o.TS
+	}
+}
+
+// Aggregator keeps a rolling view of per-tick activity: a 24h global tick
+// ring plus per-scope (backend:<name>, model:<id>) minute buckets, lazily
+// created for scopes that have alert rules.
+type Aggregator struct {
+	mu        sync.Mutex
+	global    []tickAgg // ring buffer
+	gHead     int
+	gFull     bool
+	byScope   map[string]*scopeAgg
+	maxMinute int // minutes retained
+}
+
+func NewAggregator(capTicks, maxMinute int) *Aggregator {
+	if capTicks < 1 {
+		capTicks = 1
+	}
+	return &Aggregator{
+		global:    make([]tickAgg, capTicks),
+		byScope:   map[string]*scopeAgg{},
+		maxMinute: maxMinute,
+	}
+}
+
+type scopeAgg struct {
+	minutes map[int64]tickAgg // minute-aligned ts
+}
+
+func (a *Aggregator) scope(name string) *scopeAgg {
+	s, ok := a.byScope[name]
+	if !ok {
+		s = &scopeAgg{minutes: map[int64]tickAgg{}}
+		a.byScope[name] = s
+	}
+	return s
+}
+
+func (a *Aggregator) minute(s *scopeAgg, minute int64, t tickAgg) {
+	t.TS = minute * 60000
+	v := s.minutes[minute]
+	v.merge(t)
+	s.minutes[minute] = v
+	if len(s.minutes) > a.maxMinute*2 {
+		cutoff := minute - int64(a.maxMinute)
+		for k := range s.minutes {
+			if k < cutoff {
+				delete(s.minutes, k)
+			}
+		}
+	}
+}
+
+// Feed stores one tick. models/backends may be empty (nothing happened).
+func (a *Aggregator) Feed(t tickAgg, models, backends map[string]tickAgg) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.global[a.gHead] = t
+	a.gHead = (a.gHead + 1) % len(a.global)
+	if a.gHead == 0 {
+		a.gFull = true
+	}
+	mk := t.TS / 60000
+	for name, agg := range models {
+		a.minute(a.scope("model:"+name), mk, agg)
+	}
+	for name, agg := range backends {
+		a.minute(a.scope("backend:"+name), mk, agg)
+	}
+}
+
+// Sum returns the merged activity over the last `sec` seconds (0 = latest tick).
+func (a *Aggregator) Sum(sec int) tickAgg {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	var out tickAgg
+	now := time.Now().UnixMilli()
+	if sec <= 0 {
+		sec = 1
+	}
+	cutoff := now - int64(sec)*1000
+	if a.gFull {
+		n := len(a.global)
+		for i := 0; i < n; i++ {
+			t := a.global[(a.gHead+i)%n]
+			if t.TS >= cutoff && t.TS > 0 {
+				out.merge(t)
+			}
+		}
+	} else {
+		for i := 0; i < a.gHead; i++ {
+			if a.global[i].TS >= cutoff && a.global[i].TS > 0 {
+				out.merge(a.global[i])
+			}
+		}
+	}
+	return out
+}
+
+// SumScope merges activity for a scope (backend:<name> / model:<id>) over
+// the last `sec` seconds. Returns ok=false when the scope has no data.
+func (a *Aggregator) SumScope(scope string, sec int) (tickAgg, bool) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	s, ok := a.byScope[scope]
+	if !ok {
+		return tickAgg{}, false
+	}
+	cutoffMin := (time.Now().UnixMilli() - int64(sec)*1000) / 60000
+	var out tickAgg
+	for k, v := range s.minutes {
+		if k >= cutoffMin {
+			out.merge(v)
+		}
+	}
+	if out.Req == 0 && out.Err == 0 {
+		return tickAgg{}, false
+	}
+	return out, true
+}
+
+// AlertEngine evaluates config rules against the Aggregator.
+type AlertEngine struct {
+	store    *Store
+	hub      *Hub
+	rules    []AlertRule
+	agg      *Aggregator
+	mu       sync.Mutex
+	cooldown map[string]time.Time
+	recent   []AlertEvent
+	recentN  int
+}
+
+func NewAlertEngine(store *Store, hub *Hub, rules []AlertRule) *AlertEngine {
+	rules = telemetryAlertRules(rules)
+	return &AlertEngine{
+		store:    store,
+		hub:      hub,
+		rules:    rules,
+		agg:      NewAggregator(28800, 60*24),
+		cooldown: map[string]time.Time{},
+		recentN:  500,
+	}
+}
+
+func defaultAlertRules() []AlertRule {
+	return []AlertRule{
+		{ID: "error-rate-global", Metric: "error_rate", Scope: "global", Threshold: 5, WindowSec: 300, Severity: "warning"},
+		{ID: "failover-global", Metric: "failover_rate", Scope: "global", Threshold: 10, WindowSec: 300, Severity: "warning"},
+		{ID: "cost-hour-global", Metric: "cost_per_hour", Scope: "global", Threshold: 0.50, WindowSec: 3600, Severity: "info"},
+		{ID: "latency-p95-global", Metric: "latency_p95", Scope: "global", Threshold: 10000, WindowSec: 600, Severity: "warning"},
+		{ID: "keys-cooldown-global", Metric: "keys_in_cooldown", Scope: "global", Threshold: 1, WindowSec: 0, Severity: "warning"},
+		{ID: "telemetry-errors", Metric: "telemetry_errors", Scope: "global", Threshold: 1, WindowSec: 0, Severity: "critical", CooldownSec: 300},
+		{ID: "telemetry-pressure", Metric: "telemetry_queued", Scope: "global", Threshold: 1536, WindowSec: 0, Severity: "warning", CooldownSec: 300},
+	}
+}
+
+// Feed forwards a tick into the aggregator.
+func (e *AlertEngine) Feed(t tickAgg, models, backends map[string]tickAgg) {
+	e.agg.Feed(t, models, backends)
+}
+
+// Eval runs all rules once. keyCooldown returns the current count of keys
+// in cooldown across all backends.
+func (e *AlertEngine) Eval(now time.Time, keyCooldown func() int) {
+	rules := e.Rules()
+	for i := range rules {
+		e.evalRule(&rules[i], now, keyCooldown)
+	}
+}
+
+func (e *AlertEngine) evalRule(r *AlertRule, now time.Time, keyCooldown func() int) {
+	var value float64
+
+	if r.Scope == "" || r.Scope == "global" {
+		t := e.agg.Sum(r.WindowSec)
+		switch r.Metric {
+		case "telemetry_errors":
+			if e.store != nil {
+				v := e.store.Telemetry()
+				value = float64(v.WriteErrors + v.DroppedRequests + v.DroppedKeyEvents)
+			}
+		case "telemetry_queued":
+			if e.store != nil {
+				value = float64(e.store.Telemetry().Queued)
+			}
+		case "error_rate":
+			if t.Req > 0 {
+				value = float64(t.Err) / float64(t.Req) * 100
+			}
+		case "failover_rate":
+			if t.Req > 0 {
+				value = float64(t.Failover) / float64(t.Req) * 100
+			}
+		case "cost_per_hour":
+			hrs := float64(r.WindowSec) / 3600
+			if hrs <= 0 {
+				hrs = 1
+			}
+			value = t.Cost / hrs
+		case "rps":
+			value = float64(t.Req) / float64(r.WindowSec)
+		case "tokens_per_hour":
+			value = float64(t.TokIn+t.TokOut) / float64(r.WindowSec) * 3600
+		case "latency_p95":
+			if t.LatN > 0 {
+				value = t.P95Ms
+			}
+		case "ttft_p95":
+			value = histogramPercentile(t.TTFTHist, 95)
+		case "ttft_avg":
+			if t.TTFTN > 0 {
+				value = t.TTFTAvgMs()
+			}
+		case "keys_in_cooldown":
+			value = float64(keyCooldown())
+		}
+	} else {
+		t, has := e.agg.SumScope(r.Scope, r.WindowSec)
+		if !has {
+			return
+		}
+		switch r.Metric {
+		case "error_rate":
+			if t.Req > 0 {
+				value = float64(t.Err) / float64(t.Req) * 100
+			}
+		case "failover_rate":
+			if t.Req > 0 {
+				value = float64(t.Failover) / float64(t.Req) * 100
+			}
+		case "cost_per_hour":
+			hrs := float64(r.WindowSec) / 3600
+			if hrs <= 0 {
+				hrs = 1
+			}
+			value = t.Cost / hrs
+		case "rps":
+			value = float64(t.Req) / float64(r.WindowSec)
+		case "tokens_per_hour":
+			value = float64(t.TokIn+t.TokOut) / float64(r.WindowSec) * 3600
+		case "latency_p95":
+			if t.LatN > 0 {
+				value = t.P95Ms
+			}
+		case "ttft_p95":
+			value = histogramPercentile(t.TTFTHist, 95)
+		case "ttft_avg":
+			if t.TTFTN > 0 {
+				value = t.TTFTAvgMs()
+			}
+		}
+	}
+
+	if value < r.Threshold {
+		return
+	}
+
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if last, seen := e.cooldown[r.ID]; seen && now.Sub(last) < time.Duration(r.CooldownSec)*time.Second {
+		return
+	}
+	e.cooldown[r.ID] = now
+
+	ev := AlertEvent{
+		TS:        now.UnixMilli(),
+		RuleID:    r.ID,
+		Name:      r.Metric + " · " + r.Scope,
+		Severity:  r.Severity,
+		Scope:     r.Scope,
+		Metric:    r.Metric,
+		Value:     value,
+		Threshold: r.Threshold,
+		Message:   alertMessage(r, value),
+	}
+	e.recent = append(e.recent, ev)
+	if len(e.recent) > e.recentN {
+		e.recent = e.recent[1:]
+	}
+	if e.store != nil {
+		if err := e.store.InsertAlert(ev); err != nil {
+			log.Printf("[alerts] persist: %v", err)
+		}
+	}
+	if e.hub != nil {
+		e.hub.Publish(map[string]any{"type": "alert", "alert": ev})
+	}
+	log.Printf("[alert] %s %s", r.Severity, ev.Message)
+}
+
+func alertMessage(r *AlertRule, value float64) string {
+	unit := map[string]string{
+		"error_rate":       "%",
+		"failover_rate":    "%",
+		"cost_per_hour":    " $/h",
+		"rps":              " req/s",
+		"tokens_per_hour":  " tok/h",
+		"latency_p95":      " ms",
+		"ttft_avg":         " ms",
+		"keys_in_cooldown": " keys",
+	}[r.Metric]
+	scope := r.Scope
+	if scope == "" {
+		scope = "global"
+	}
+	return r.Metric + " " + formatNum(value) + unit + " ≥ " + formatNum(r.Threshold) + unit + " over " + scope
+}
+
+func formatNum(v float64) string {
+	return strconv.FormatFloat(v, 'f', 2, 64)
+}
+
+// Recent returns recent alerts, newest first.
+func (e *AlertEngine) Recent(n int) []AlertEvent {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if n <= 0 || n > len(e.recent) {
+		n = len(e.recent)
+	}
+	out := make([]AlertEvent, n)
+	for i := 0; i < n; i++ {
+		out[i] = e.recent[len(e.recent)-1-i]
+	}
+	return out
+}
+
+// Rules returns the configured rules.
+func (e *AlertEngine) Rules() []AlertRule {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	out := make([]AlertRule, len(e.rules))
+	copy(out, e.rules)
+	return out
+}
+
+func (e *AlertEngine) SetRules(rules []AlertRule) {
+	rules = telemetryAlertRules(rules)
+	e.mu.Lock()
+	e.rules = rules
+	e.mu.Unlock()
+}
+
+func telemetryAlertRules(rules []AlertRule) []AlertRule {
+	if len(rules) == 0 {
+		return defaultAlertRules()
+	}
+	out := append([]AlertRule(nil), rules...)
+	for _, rule := range defaultAlertRules() {
+		if rule.Metric != "telemetry_errors" && rule.Metric != "telemetry_queued" {
+			continue
+		}
+		found := false
+		for _, configured := range out {
+			if configured.Metric == rule.Metric {
+				found = true
+				break
+			}
+		}
+		if !found {
+			out = append(out, rule)
+		}
+	}
+	return out
+}

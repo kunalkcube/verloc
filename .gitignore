@@ -1,0 +1,74 @@
+# verloc — only source and required files are committed.
+# Rule: if it is generated, secret, local runtime state, or editor noise, it stays out.
+
+# --- Secrets / local config (never commit) ---
+config.json
+config.json.*
+.env
+.env.*
+!.env.example
+!.env.*.example
+master.key
+setup.token
+
+# --- Built binary ---
+/verloc
+/verloc.bak.*
+*.exe
+*.test
+*.out
+coverage.out
+
+# --- Logs ---
+*.log
+logs/
+
+# --- SQLite runtime databases and sidecars (including custom storage paths) ---
+*.db
+*.db-wal
+*.db-shm
+*.sqlite
+*.sqlite-wal
+*.sqlite-shm
+*.sqlite3
+*.sqlite3-wal
+*.sqlite3-shm
+
+# --- Node dependencies / generated (keep package-lock.json in dashboard/) ---
+node_modules/
+/package-lock.json
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# --- Dashboard build output (embedded copy lives in internal/server/static) ---
+dashboard/dist/
+*.pid
+
+# --- Private management state and backups ---
+verloc-data/
+backups/
+analytics-archive/
+
+# --- Agent skills and internal docs (local only) ---
+.agents/
+context/
+docs/
+AGENTS.md
+
+# --- Local scratch dirs ---
+test/
+meow/
+tmp/
+*.tmp
+*.bak
+
+# --- Editor / OS noise ---
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+*.swo
+*~

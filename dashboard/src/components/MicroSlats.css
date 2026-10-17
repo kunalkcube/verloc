@@ -1,0 +1,29 @@
+/* Fine slate ribs across the entire workspace, not just a decorative banner. */
+.micro-slats {
+  position: relative;
+  isolation: isolate;
+  background-color: var(--background);
+}
+.micro-slats::before,
+.micro-slats::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  z-index: -1;
+  pointer-events: none;
+}
+.micro-slats::before {
+  background-image: repeating-linear-gradient(
+    90deg,
+    rgb(137 164 184 / 4%) 0,
+    rgb(137 164 184 / 4%) 1px,
+    transparent 1px,
+    transparent 5px
+  );
+  mask-image: linear-gradient(to bottom, black, rgb(0 0 0 / 35%));
+}
+.micro-slats::after {
+  background:
+    radial-gradient(ellipse at 94% 0, rgb(114 185 255 / 4%), transparent 48%),
+    linear-gradient(135deg, rgb(101 230 207 / 2%), transparent 42%);
+}

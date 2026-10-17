@@ -1,0 +1,27 @@
+{
+  "listen": ":8080",
+  "management_db": "verloc-data/control.db",
+  "master_key_file": "verloc-data/master.key",
+  "setup_token_file": "verloc-data/setup.token",
+  "secure_cookies": false,
+  "default_provider": "nvidia",
+  "cooldown_seconds": 30,
+  "model_map": {
+    "nv/deepseek-ai/deepseek-v4.1-flash": "nvidia:deepseek-ai/deepseek-v4.1-flash"
+  },
+  "providers": {
+    "nvidia": {
+      "base_url": "https://integrate.api.nvidia.com/v1",
+      "auth_header": "Authorization",
+      "auth_header_format": "Bearer %s",
+      "cooldown_seconds": 30,
+      "keys": []
+    }
+  },
+  "model_meta": {
+    "nv/deepseek-ai/deepseek-v4.1-flash": {
+      "name": "DeepSeek V4.1 Flash",
+      "context_window": 1048576
+    }
+  }
+}
