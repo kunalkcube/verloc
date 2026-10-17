@@ -39,6 +39,8 @@ func Run() {
 	backupDir := flag.String("backup", "", "create a consistent backup directory and exit")
 	restoreDir := flag.String("restore", "", "restore a backup into new database paths and exit")
 	exportBootstrap := flag.String("export-bootstrap", "", "write a new secret-free bootstrap file after import and exit")
+	pruneAlerts := flag.Bool("prune-alerts", false, "collapse stored alert history to the configured cooldown and exit")
+	applyPrune := flag.Bool("apply", false, "with -prune-alerts, actually write the change instead of only reporting it")
 	flag.Parse()
 
 	cfg, err := loadBootstrap(*configPath)
@@ -79,6 +81,34 @@ func Run() {
 		}
 		_ = srv.Close()
 		log.Printf("backup saved to %s; keep the master key separately", *backupDir)
+		return
+	}
+	if *pruneAlerts {
+		if srv.store == nil {
+			_ = srv.Close()
+			log.Fatal("no analytics database is open; nothing to prune")
+		}
+		cooldown := DefaultAlertCooldownSec
+		if c := srv.runtime().cfg; c != nil {
+			for _, r := range c.Dashboard.Alerts {
+				if r.CooldownSec > 0 && r.CooldownSec < cooldown {
+					cooldown = r.CooldownSec
+				}
+			}
+		}
+		stats, err := srv.store.CollapseAlertHistory(cooldown, !*applyPrune)
+		if err != nil {
+			_ = srv.Close()
+			log.Fatalf("prune alerts: %v", err)
+		}
+		log.Printf("alert history: %d rows -> %d (dropping %d within %ds cooldown windows)", stats.Before, stats.After, stats.Dropped, cooldown)
+		for id, n := range stats.Rules {
+			log.Printf("  %-24s %d duplicate rows", id, n)
+		}
+		if !*applyPrune {
+			log.Printf("dry run: nothing written. Re-run with -apply to commit (back up first).")
+		}
+		_ = srv.Close()
 		return
 	}
 

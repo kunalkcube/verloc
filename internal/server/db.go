@@ -1202,6 +1202,112 @@ func (s *Store) RecentAlerts(n int) []AlertEvent {
 	return out
 }
 
+// AlertCollapseStats reports what a retroactive cooldown pass did (or, in
+// dry-run mode, would do) to the alert history.
+type AlertCollapseStats struct {
+	Before  int // rows present before the pass
+	After   int // rows remaining after the pass
+	Dropped int // Before - After
+	Rules   map[string]int
+}
+
+// CollapseAlertHistory applies the engine's cooldown to alerts already stored,
+// so a flood recorded before the engine enforced a cooldown is retired.
+//
+// This is the retroactive counterpart to the rule fix. The stored rows were each
+// individually correct — the condition really was over threshold — but a
+// sustained condition used to re-fire on every eval, so a single hour-long
+// incident could leave one row every 5s. Rerunning the history through the
+// cooldown the engine now enforces keeps the first evaluation of each incident,
+// then one row per window while it persists, and drops the per-eval duplicates.
+//
+// Rows are re-inserted with rewritten ids because `alerts.id` is AUTOINCREMENT,
+// so an explicit id cannot be preserved. The original ts, rule, value, threshold
+// and message are kept; keeping ts preserves the ordering the read path depends
+// on, so a rewrite cannot reorder or duplicate the surviving rows.
+//
+// It runs in one committed transaction: the table is cleared and the surviving
+// rows are re-inserted, so a failure part-way rolls back to the original history
+// rather than leaving a half-pruned table. With dryRun set, the transaction is
+// rolled back and only the counts are reported.
+func (s *Store) CollapseAlertHistory(cooldownSec int, dryRun bool) (AlertCollapseStats, error) {
+	if cooldownSec <= 0 {
+		cooldownSec = DefaultAlertCooldownSec
+	}
+	stats := AlertCollapseStats{Rules: map[string]int{}}
+	windowMs := int64(cooldownSec) * 1000
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	// Read in id order within each rule so "previous" is the incident's last
+	// surviving row. Ordering by (rule_id, ts, id) is stable even for rows that
+	// share a millisecond.
+	rows, err := s.db.Query(`SELECT id, ts, rule_id, name, severity, scope, metric, value, threshold, message
+	                         FROM alerts ORDER BY rule_id, ts, id`)
+	if err != nil {
+		return stats, err
+	}
+	type storedAlert struct {
+		id int64
+		ev AlertEvent
+	}
+	var (
+		all  []storedAlert
+		keep []storedAlert
+		last = map[string]int64{}
+	)
+	for rows.Next() {
+		var a storedAlert
+		if err := rows.Scan(&a.id, &a.ev.TS, &a.ev.RuleID, &a.ev.Name, &a.ev.Severity,
+			&a.ev.Scope, &a.ev.Metric, &a.ev.Value, &a.ev.Threshold, &a.ev.Message); err != nil {
+			continue
+		}
+		all = append(all, a)
+		if prev, ok := last[a.ev.RuleID]; ok && a.ev.TS-prev < windowMs {
+			stats.Rules[a.ev.RuleID]++
+			continue
+		}
+		last[a.ev.RuleID] = a.ev.TS
+		keep = append(keep, a)
+	}
+	rowsErr := rows.Err()
+	rows.Close()
+	if rowsErr != nil {
+		return stats, rowsErr
+	}
+
+	stats.Before = len(all)
+	stats.After = len(keep)
+	stats.Dropped = stats.Before - stats.After
+
+	tx, err := s.db.Begin()
+	if err != nil {
+		return stats, err
+	}
+	defer tx.Rollback()
+
+	// Clear and re-insert inside one transaction. Deleting the kept rows by id
+	// while re-inserting them would collide on the AUTOINCREMENT primary key, so
+	// the table is wiped and the survivors rebuilt from the snapshot read above.
+	if _, err := tx.Exec(`DELETE FROM alerts`); err != nil {
+		return stats, err
+	}
+	for _, a := range keep {
+		if _, err := tx.Exec(
+			`INSERT INTO alerts (ts, rule_id, name, severity, scope, metric, value, threshold, message)
+			 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			a.ev.TS, a.ev.RuleID, a.ev.Name, a.ev.Severity, a.ev.Scope,
+			a.ev.Metric, a.ev.Value, a.ev.Threshold, a.ev.Message); err != nil {
+			return stats, err
+		}
+	}
+	if dryRun {
+		return stats, nil // deferred Rollback leaves history untouched.
+	}
+	return stats, tx.Commit()
+}
+
 // RecentKeyEvents returns the last n key events, newest first.
 func (s *Store) RecentKeyEvents(n int) []KeyEvent {
 	s.mu.Lock()

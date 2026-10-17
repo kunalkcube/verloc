@@ -249,7 +249,22 @@ func defaultAlertRules() []AlertRule {
 		{ID: "error-rate-global", Metric: "error_rate", Scope: "global", Threshold: 5, WindowSec: 300, Severity: "warning", CooldownSec: cd},
 		{ID: "failover-global", Metric: "failover_rate", Scope: "global", Threshold: 10, WindowSec: 300, Severity: "warning", CooldownSec: cd},
 		{ID: "cost-hour-global", Metric: "cost_per_hour", Scope: "global", Threshold: 0.50, WindowSec: 3600, Severity: "info", CooldownSec: cd},
-		{ID: "latency-p95-global", Metric: "latency_p95", Scope: "global", Threshold: 10000, WindowSec: 600, Severity: "warning", CooldownSec: cd},
+		// Latency is alerted on TIME TO FIRST TOKEN, not total latency.
+		//
+		// Total latency tracks output size far more than it tracks upstream health:
+		// measured on this gateway, decode throughput was a flat ~294-394 tok/s in
+		// every latency bucket, while requests over 30s averaged ~12,230 output
+		// tokens against ~272 for requests under 5s. So a fixed total-latency
+		// threshold fires on every long generation — which is normal, healthy
+		// behaviour — and is silent about a genuinely stalled upstream. It cannot
+		// be fixed by changing the number; any ms threshold is the wrong shape.
+		//
+		// Time to first token is the part that measures the upstream rather than
+		// the workload, so p95 TTFT >= 15s is the actionable signal.
+		{ID: "ttft-p95-global", Metric: "ttft_p95", Scope: "global", Threshold: 15000, WindowSec: 600, Severity: "warning", CooldownSec: cd},
+		// Deliberately NOT a default: a total-latency rule, for the reason above.
+		// Add one from Settings if you want to watch the end-to-end distribution,
+		// but expect it to track generation length rather than gateway health.
 		{ID: "keys-cooldown-global", Metric: "keys_in_cooldown", Scope: "global", Threshold: 1, WindowSec: 0, Severity: "warning", CooldownSec: cd},
 		{ID: "telemetry-errors", Metric: "telemetry_errors", Scope: "global", Threshold: 1, WindowSec: 0, Severity: "critical", CooldownSec: 300},
 		{ID: "telemetry-pressure", Metric: "telemetry_queued", Scope: "global", Threshold: 1536, WindowSec: 0, Severity: "warning", CooldownSec: 300},

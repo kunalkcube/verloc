@@ -100,11 +100,15 @@ func TestSustainedConditionDoesNotFlood(t *testing.T) {
 	for i := 0; i < steps; i++ {
 		// Refresh at the current instant so the rule's window always contains an
 		// over-threshold sample (Sum reads real time; only cooldown is simulated).
+		// Both histograms are fed: the default latency signal is TTFT (a stalled
+		// upstream), and total latency is deliberately not a default rule.
 		e.Feed(tickAgg{
-			TS:      time.Now().UnixMilli(),
-			Req:     1,
-			LatN:    1,
-			LatHist: latHistAt(30000),
+			TS:       time.Now().UnixMilli(),
+			Req:      1,
+			LatN:     1,
+			LatHist:  latHistAt(30000),
+			TTFTN:    1,
+			TTFTHist: latHistAt(30000),
 		}, nil, nil)
 		simNow = simNow.Add(evalEvery)
 		e.Eval(simNow, func() int { return 0 })
@@ -193,4 +197,82 @@ func latHistAt(ms float64) [len(latBuckets) + 1]uint64 {
 	var h [len(latBuckets) + 1]uint64
 	h[bucketOf(ms)]++
 	return h
+}
+
+// TestDefaultLatencyAlertWatchesTTFTNotTotalLatency pins the scoping decision.
+//
+// Total latency tracks output length far more than upstream health: measured on
+// this gateway, decode throughput was a flat ~294-394 tok/s across every latency
+// bucket, while requests over 30s averaged ~12,230 output tokens against ~272 for
+// requests under 5s. A fixed total-latency threshold therefore fires on every long
+// generation — normal, healthy behaviour — and says nothing about a stalled
+// upstream. Time to first token is the part that measures the upstream, so that is
+// what the default watches. Any total-latency threshold is the wrong shape, so
+// this is deliberately not a matter of picking a bigger number.
+func TestDefaultLatencyAlertWatchesTTFTNotTotalLatency(t *testing.T) {
+	var sawTTFT, sawTotal bool
+	for _, r := range defaultAlertRules() {
+		switch r.Metric {
+		case "ttft_p95":
+			sawTTFT = true
+		case "latency_p95":
+			sawTotal = true
+		}
+	}
+	if !sawTTFT {
+		t.Error("no default rule watches ttft_p95; a stalled upstream would go unnoticed")
+	}
+	if sawTotal {
+		t.Error("a default rule watches latency_p95, which tracks output length rather than " +
+			"gateway health and will fire on ordinary long generations")
+	}
+}
+
+// TestStalledUpstreamIsStillDetected proves the signal that matters is not lost:
+// a long time to first token raises ttft_p95 and fires.
+func TestStalledUpstreamIsStillDetected(t *testing.T) {
+	st := newTestStore(t)
+	e := NewAlertEngine(st, nil, nil)
+
+	// A single stalled stream: 20s before the first token.
+	e.Feed(tickAgg{
+		TS:       time.Now().UnixMilli(),
+		Req:      1,
+		LatN:     1,
+		LatHist:  latHistAt(20400),
+		TTFTN:    1,
+		TTFTHist: latHistAt(20400),
+	}, nil, nil)
+	e.Eval(time.Now(), func() int { return 0 })
+
+	got := st.RecentAlerts(10)
+	if len(got) != 1 {
+		t.Fatalf("stalled upstream produced %d alerts, want 1", len(got))
+	}
+	if got[0].Metric != "ttft_p95" {
+		t.Fatalf("alerted on %q, want ttft_p95", got[0].Metric)
+	}
+}
+
+// TestLongGenerationDoesNotAlert proves the converse: a big, slow-but-healthy
+// generation (short TTFT, long total) no longer raises an alert.
+func TestLongGenerationDoesNotAlert(t *testing.T) {
+	st := newTestStore(t)
+	e := NewAlertEngine(st, nil, nil)
+
+	// 12k tokens at ~300 tok/s is ~40s total, but the first token arrives fast —
+	// exactly the workload that used to trip the total-latency rule.
+	e.Feed(tickAgg{
+		TS:       time.Now().UnixMilli(),
+		Req:      1,
+		LatN:     1,
+		LatHist:  latHistAt(40000),
+		TTFTN:    1,
+		TTFTHist: latHistAt(900),
+	}, nil, nil)
+	e.Eval(time.Now(), func() int { return 0 })
+
+	if got := st.RecentAlerts(10); len(got) != 0 {
+		t.Fatalf("healthy long generation produced %d alerts, want 0: %+v", len(got), got[0])
+	}
 }
