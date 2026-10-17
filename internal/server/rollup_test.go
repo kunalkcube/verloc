@@ -139,6 +139,35 @@ func TestRollupTotalsMatchRawSum(t *testing.T) {
 	}
 }
 
+// TestEnsureTotalsBackfillSeedsUpgradedDatabase simulates a database upgraded
+// from a schema without analytics_totals: real tick history, unseeded totals
+// row. The boot repair must seed it from the raw ticks, or the dashboard's
+// lifetime headline and retained-window range silently read zero.
+func TestEnsureTotalsBackfillSeedsUpgradedDatabase(t *testing.T) {
+	s := testKeyEventStore(t)
+	base := time.Now().Add(-time.Hour).UnixMilli()
+	seedTicks(t, s, 40, base, false)
+	// Simulate the pre-upgrade state: history exists, totals were never seeded.
+	if _, err := s.db.Exec(`UPDATE analytics_totals SET cost=0,requests=0,tok_in=0,tok_out=0,tok_cache=0,err=0,oldest_ts=0,newest_ts=0,ticks=0 WHERE id=1`); err != nil {
+		t.Fatal(err)
+	}
+
+	s.EnsureRollupsBackfilled(context.Background())
+
+	gotCost, gotReq, _, _, _, gotErr := s.LifetimeTotals()
+	wantCost, wantReq, _, _, _, wantErr := s.SumSnapshots()
+	if diffFloat(gotCost, wantCost) || gotReq != wantReq || gotErr != wantErr {
+		t.Fatalf("totals after boot repair: cost=%v req=%d err=%d, want cost=%v req=%d err=%d",
+			gotCost, gotReq, gotErr, wantCost, wantReq, wantErr)
+	}
+	if gotReq == 0 {
+		t.Fatal("boot repair left the totals row empty")
+	}
+	if oldest, _, count := s.Range(); oldest == 0 || count == 0 {
+		t.Fatalf("retained window not restored: oldest=%d count=%d", oldest, count)
+	}
+}
+
 // TestRangeMatchesRawTicks guards the window bounds now served from the totals row.
 func TestRangeMatchesRawTicks(t *testing.T) {
 	s := testKeyEventStore(t)

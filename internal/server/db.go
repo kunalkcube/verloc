@@ -484,15 +484,30 @@ func (s *Store) RebuildRollups(ctx context.Context) (int, error) {
 	return written, nil
 }
 
-// EnsureRollupsBackfilled rebuilds the minute rollup when the analytics store
-// has raw ticks but no rollup (i.e. history that predates it). Runs in the
-// background so startup is never blocked by a large rebuild.
+// EnsureRollupsBackfilled repairs derived state for history that predates it.
+// It stays O(1) when everything is consistent. Runs in the background so
+// startup is never blocked by a large rebuild.
 func (s *Store) EnsureRollupsBackfilled(ctx context.Context) {
 	s.mu.Lock()
-	var minutes, ticks int64
+	var minutes, ticks, totalTicks int64
 	_ = s.db.QueryRow(`SELECT COUNT(*) FROM snapshot_minute`).Scan(&minutes)
 	_ = s.db.QueryRow(`SELECT COUNT(*) FROM snapshots`).Scan(&ticks)
+	_ = s.db.QueryRow(`SELECT ticks FROM analytics_totals WHERE id=1`).Scan(&totalTicks)
 	s.mu.Unlock()
+	// A database upgraded from a schema without analytics_totals (or one that
+	// briefly ran a build that never seeded it) has ticks but an empty/partial
+	// totals row, so LifetimeTotals and the retained-window Range would read
+	// zero for all pre-existing history. The healthy invariant is exactly one
+	// totals increment per snapshot row, so any mismatch marks the row as
+	// unseeded. RebuildTotals takes s.mu like every tick insert, so it cannot
+	// interleave with the live writer.
+	if ticks > 0 && totalTicks != ticks {
+		if err := s.RebuildTotals(); err != nil {
+			log.Printf("[analytics] totals backfill failed: %v", err)
+		} else {
+			log.Printf("[analytics] totals backfill complete: %d ticks", ticks)
+		}
+	}
 	if minutes > 0 || ticks == 0 {
 		return
 	}
