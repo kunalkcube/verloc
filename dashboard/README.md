@@ -1,32 +1,20 @@
-# React + TypeScript + Vite
+# verloc dashboard
 
-This template provides a minimal setup to get React working in Vite with HMR and some Oxlint rules.
+React SPA for the verloc gateway, served under `/dash/`. Built by Vite into
+`internal/server/static/`, which is embedded in the Go binary with
+`//go:embed all:static`.
 
-Currently, two official plugins are available:
+Stack: React 19, Vite 8, TypeScript, Tailwind v4, Recharts, Base UI.
 
-- [@vitejs/plugin-react](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react) uses [Oxc](https://oxc.rs)
-- [@vitejs/plugin-react-swc](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react-swc) uses [SWC](https://swc.rs/)
+## Development
 
-## React Compiler
-
-The React Compiler is not enabled on this template because of its impact on dev & build performances. To add it, see [this documentation](https://react.dev/learn/react-compiler/installation).
-
-## Expanding the Oxlint configuration
-
-If you are developing a production application, we recommend enabling type-aware lint rules by installing `oxlint-tsgolint` and editing `.oxlintrc.json`:
-
-```json
-{
-  "$schema": "./node_modules/oxlint/configuration_schema.json",
-  "plugins": ["react", "typescript", "oxc"],
-  "options": {
-    "typeAware": true
-  },
-  "rules": {
-    "react/rules-of-hooks": "error",
-    "react/only-export-components": ["warn", { "allowConstantExport": true }]
-  }
-}
+```sh
+npm ci
+npm run dev     # http://localhost:8789, proxies /dash/api to :18080
+npm run build   # emits to ../internal/server/static
+npm run lint    # oxlint
 ```
 
-See the [Oxlint rules documentation](https://oxc.rs/docs/guide/usage/linter/rules) for the full list of rules and categories.
+`internal/server/static/` is committed so a Go-only build works without Node.
+After a frontend change, rebuild the assets **and** the Go binary; a running
+binary embeds the previous assets and cannot pick up new ones from disk.
