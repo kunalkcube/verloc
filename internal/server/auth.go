@@ -314,37 +314,94 @@ func (s *Security) handleAuthSession(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, response)
 }
 
-func (s *Security) beginLogin(w http.ResponseWriter, r *http.Request) bool {
-	if !s.requireSecurityOrigin(w, r) {
-		return false
-	}
-	ip, _, err := net.SplitHostPort(r.RemoteAddr)
-	if err != nil {
-		ip = r.RemoteAddr
-	}
+// loginThrottled reports whether the caller's address has exhausted its FAILED
+// attempt budget. It deliberately counts only failures: the previous version
+// counted every attempt and rejected before the password was verified, so once
+// an address was hot even the correct password was refused — the owner could be
+// locked out of their own dashboard by anyone able to reach the login route
+// (and behind a reverse proxy every client shares one address). Throttling
+// failures preserves brute-force resistance without that denial.
+func (s *Security) loginThrottled(r *http.Request) bool {
+	ip := loginAddr(r)
 	now := time.Now()
 	s.loginMu.Lock()
+	defer s.loginMu.Unlock()
 	s.sweepLogins(now)
 	a, exists := s.logins[ip]
-	// Reset the caller's own entry the moment its window lapses so a throttled
-	// IP is released exactly at loginWindow, independently of the bounded sweep.
-	if exists && now.Sub(a.start) >= loginWindow {
+	if !exists {
+		return false
+	}
+	// Release the address exactly when its window lapses, independently of the
+	// bounded sweep.
+	if now.Sub(a.start) >= loginWindow {
 		delete(s.logins, ip)
+		return false
+	}
+	return a.count >= loginAttemptLimit
+}
+
+// noteLoginFailure records one failed attempt for the caller's address.
+func (s *Security) noteLoginFailure(r *http.Request) {
+	ip := loginAddr(r)
+	now := time.Now()
+	s.loginMu.Lock()
+	defer s.loginMu.Unlock()
+	s.sweepLogins(now)
+	a, exists := s.logins[ip]
+	if exists && now.Sub(a.start) >= loginWindow {
 		a = loginAttempts{}
 		exists = false
 	}
-	if (!exists && len(s.logins) >= loginMaxEntries) || a.count >= loginAttemptLimit {
-		s.loginMu.Unlock()
-		w.Header().Set("Retry-After", loginRetryAfter)
-		writeErr(w, http.StatusTooManyRequests, "authentication temporarily unavailable")
-		return false
+	if !exists && len(s.logins) >= loginMaxEntries {
+		// Bounded memory, without either failure mode of the alternatives:
+		// refusing to record once full would let an attacker who fills the map
+		// keep guessing from fresh addresses unthrottled, and rejecting every
+		// caller because the map is full (the original behaviour) let anyone
+		// lock the owner out. Evict the oldest-started entry instead, so a new
+		// failure is always recorded and the map stays capped.
+		oldestIP, oldest := "", time.Time{}
+		for k, v := range s.logins {
+			if oldestIP == "" || v.start.Before(oldest) {
+				oldestIP, oldest = k, v.start
+			}
+		}
+		delete(s.logins, oldestIP)
 	}
 	if !exists {
 		a.start = now
 	}
 	a.count++
 	s.logins[ip] = a
+}
+
+// clearLoginFailures drops the caller's failure record after a success, so a
+// legitimate owner is never penalised for earlier typos.
+func (s *Security) clearLoginFailures(r *http.Request) {
+	ip := loginAddr(r)
+	s.loginMu.Lock()
+	delete(s.logins, ip)
 	s.loginMu.Unlock()
+}
+
+func loginAddr(r *http.Request) string {
+	ip, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil {
+		return r.RemoteAddr
+	}
+	return ip
+}
+
+// beginLogin enforces origin, throttling and the global concurrency slot.
+// The slot is still released by the caller in a defer.
+func (s *Security) beginLogin(w http.ResponseWriter, r *http.Request) bool {
+	if !s.requireSecurityOrigin(w, r) {
+		return false
+	}
+	if s.loginThrottled(r) {
+		w.Header().Set("Retry-After", loginRetryAfter)
+		writeErr(w, http.StatusTooManyRequests, "authentication temporarily unavailable")
+		return false
+	}
 	select {
 	case s.loginSlots <- struct{}{}:
 		return true
@@ -478,6 +535,7 @@ func (s *Security) handleAuthLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if len(req.Password) > 1024 {
+		s.noteLoginFailure(r)
 		writeErr(w, 401, "authentication failed")
 		return
 	}
@@ -498,9 +556,13 @@ func (s *Security) handleAuthLogin(w http.ResponseWriter, r *http.Request) {
 	}
 	hash, err := deriveOwnerPassword(req.Password, salt)
 	if err != nil || !found || subtle.ConstantTimeCompare(hash, expected) != 1 {
+		s.noteLoginFailure(r)
 		writeErr(w, 401, "authentication failed")
 		return
 	}
+	// Correct password: clear the failure record so a legitimate owner is never
+	// penalised for earlier typos.
+	s.clearLoginFailures(r)
 	tx, err := s.control.db.BeginTx(r.Context(), nil)
 	if err != nil {
 		writeErr(w, 500, "authentication unavailable")

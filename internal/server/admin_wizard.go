@@ -2,11 +2,15 @@ package server
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
 	"log"
+	"net"
 	"net/http"
+	"net/netip"
+	"net/url"
 	"sort"
 	"strings"
 	"time"
@@ -37,9 +41,59 @@ type probeReq struct {
 	AuthHeaderFormat string `json:"auth_header_format"`
 	NoAuth           bool   `json:"no_auth"`
 	SynthesizeCLI    bool   `json:"synthesize_cli_headers"`
+	AllowPrivate     bool   `json:"allow_private_upstreams"`
+}
+
+// guardProbeHost blocks the probe from reaching loopback/link-local/private
+// addresses unless the caller explicitly opts in. The probes are owner-only and
+// never follow redirects, and a stored credential is only attached when no
+// base_url is supplied — so this is defence-in-depth against using the gateway
+// as a blind SSRF relay to internal metadata services, not a credential leak.
+//
+// The opt-in matters: a self-hosted gateway legitimately points at a LAN
+// upstream (Ollama, llama.cpp, vLLM), so this must not be an unconditional
+// refusal. A literal IP is checked directly; a hostname is resolved, because
+// "localhost" and internal DNS names must not slip through.
+func guardProbeHost(ctx context.Context, baseURL string, allowPrivate bool) error {
+	u, err := url.Parse(baseURL)
+	if err != nil {
+		return fmt.Errorf("base_url is not a valid URL")
+	}
+	host := u.Hostname()
+	if host == "" {
+		return fmt.Errorf("base_url has no host")
+	}
+	if allowPrivate {
+		return nil
+	}
+	check := func(ip netip.Addr) error {
+		if ip.IsLoopback() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() ||
+			ip.IsPrivate() || ip.IsUnspecified() || ip.IsMulticast() {
+			return fmt.Errorf("base_url points at a private or local address (%s); set allow_private_upstreams to permit it", ip)
+		}
+		return nil
+	}
+	if addr, err := netip.ParseAddr(host); err == nil {
+		return check(addr.Unmap())
+	}
+	ips, err := net.DefaultResolver.LookupNetIP(ctx, "ip", host)
+	if err != nil || len(ips) == 0 {
+		// Resolution failure must NOT block: a transient resolver blip or an
+		// air-gapped host would otherwise make the admin API unusable, and the
+		// probe's own connection fails anyway if the host truly cannot be
+		// reached. Only a POSITIVE private-address match is grounds to refuse.
+		return nil
+	}
+	for _, ip := range ips {
+		if err := check(ip.Unmap()); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func (s *Server) resolveProbeConn(req probeReq) (probeConn, error) {
+	allowPrivate := req.AllowPrivate
 	c := probeConn{
 		apiFormat:  strings.TrimSpace(req.APIFormat),
 		authHeader: strings.TrimSpace(req.AuthHeader),
@@ -72,6 +126,7 @@ func (s *Server) resolveProbeConn(req probeReq) (probeConn, error) {
 		}
 		c.noAuth = c.noAuth || p.NoAuth
 		c.synthCLI = c.synthCLI || p.SynthesizeCLIHeaders
+		allowPrivate = allowPrivate || p.AllowPrivateUpstreams
 		if c.key == "" && len(p.Keys) > 0 {
 			c.key = p.Keys[0].Key
 			if c.accountID == "" {
@@ -85,6 +140,11 @@ func (s *Server) resolveProbeConn(req probeReq) (probeConn, error) {
 	}
 	if !strings.HasPrefix(c.baseURL, "http://") && !strings.HasPrefix(c.baseURL, "https://") {
 		return c, fmt.Errorf("base_url must start with http:// or https://")
+	}
+	// Scheme is not enough: refuse loopback/link-local/private targets unless
+	// the caller opted in (a LAN upstream is a normal self-hosted setup).
+	if err := guardProbeHost(context.Background(), c.baseURL, allowPrivate); err != nil {
+		return c, err
 	}
 	if c.apiFormat != "" && c.apiFormat != "openai" && c.apiFormat != "systemone" {
 		return c, fmt.Errorf("api_format must be openai or systemone")
@@ -204,9 +264,10 @@ func (s *Server) handleAdminDiscover(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	if s.hints == nil {
-		s.hints = newHintResolver()
-	}
+	// s.hints is set by NewServer. The previous nil-guarded lazy init was a
+	// data race (two concurrent discover requests both writing the field) that
+	// a -race probe confirms; the guard only looked safe because production
+	// always constructs the resolver.
 	ids := make([]string, 0, len(models))
 	for _, m := range models {
 		ids = append(ids, m.ID)
@@ -295,9 +356,6 @@ func (s *Server) handleAdminModelHints(w http.ResponseWriter, r *http.Request) {
 			writeErr(w, http.StatusBadRequest, "invalid upstream model ID")
 			return
 		}
-	}
-	if s.hints == nil {
-		s.hints = newHintResolver()
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"hints": s.hints.hintsFor(r.Context(), s.runtime().cfg, req.Upstreams)})
 }

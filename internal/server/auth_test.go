@@ -217,16 +217,35 @@ func TestOwnerRejectsCrossOriginWrites(t *testing.T) {
 
 func TestOwnerLoginThrottlingAndConcurrency(t *testing.T) {
 	e := newSecurityTestEnv(t)
+	// The throttle counts FAILED LOGIN attempts. It no longer counts failures
+	// from other routes (a setup-token probe must not lock the owner out of
+	// login) and it is no longer keyed on a spoofable X-Forwarded-For, since
+	// RemoteAddr is what the server can actually attest.
 	for range 8 {
 		w := e.request("POST", "/dash/api/auth/setup", map[string]string{"setup_token": "wrong", "password": "long enough password"}, nil, "")
 		if w.Code != 401 {
-			t.Fatalf("unexpected pre-throttle status: %d", w.Code)
+			t.Fatalf("unexpected setup status: %d", w.Code)
 		}
+	}
+	// Setup failures must NOT throttle login.
+	fresh := httptest.NewRequest("POST", "/dash/api/auth/login", strings.NewReader(`{"password":"irrelevant"}`))
+	fresh.RemoteAddr = "192.0.2.9:5678"
+	w := httptest.NewRecorder()
+	e.mux.ServeHTTP(w, fresh)
+	if w.Code == 429 {
+		t.Fatal("setup-token failures throttled the login route")
+	}
+	// Eight genuine login failures from one address must throttle it.
+	for range 8 {
+		r := httptest.NewRequest("POST", "/dash/api/auth/login", strings.NewReader(`{"password":"wrong"}`))
+		r.RemoteAddr = "192.0.2.1:5678"
+		rr := httptest.NewRecorder()
+		e.mux.ServeHTTP(rr, r)
 	}
 	r := httptest.NewRequest("POST", "/dash/api/auth/login", strings.NewReader(`{"password":"irrelevant"}`))
 	r.RemoteAddr = "192.0.2.1:5678"
 	r.Header.Set("X-Forwarded-For", "203.0.113.7")
-	w := httptest.NewRecorder()
+	w = httptest.NewRecorder()
 	e.mux.ServeHTTP(w, r)
 	if w.Code != 429 || w.Header().Get("Retry-After") == "" {
 		t.Fatalf("throttling bypassed: %d", w.Code)

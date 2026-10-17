@@ -3,6 +3,8 @@ package server
 import (
 	"crypto/sha256"
 	"fmt"
+	"net"
+	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
@@ -138,21 +140,47 @@ func TestLoginSweepErrsOnSideOfMemoryCap(t *testing.T) {
 	}
 }
 
-// TestLoginSweepKeepsActiveThrottles verifies the cap path never evicts an active
-// throttle: a genuinely saturated active map still returns 429.
+// reqFrom builds a request with the given remote address for throttle tests.
+func reqFrom(ip string) *http.Request {
+	r := httptest.NewRequest("POST", "/dash/api/auth/login", strings.NewReader("{}"))
+	r.RemoteAddr = net.JoinHostPort(ip, "5555")
+	return r
+}
+
+// TestLoginSweepKeepsActiveThrottles verifies that a saturated map does not
+// break throttling. The map holds only entries that have FAILED, so a fresh
+// address must still be allowed to attempt (and its failure recorded), while
+// an address that has exhausted its budget is still refused. The earlier
+// version of this test asserted that a full map rejects everyone, which was
+// itself the owner-lockout bug.
 func TestLoginSweepKeepsActiveThrottles(t *testing.T) {
 	e := newSecurityTestEnv(t)
 	sec := e.security
 	now := time.Now()
+	const victim = "198.51.100.7"
 	sec.loginMu.Lock()
 	for i := range loginMaxEntries {
 		sec.logins[fmt.Sprintf("198.51.100.%d", i)] = loginAttempts{start: now, count: 1}
 	}
+	// Give one address a genuinely exhausted budget.
+	sec.logins[victim] = loginAttempts{start: now, count: loginAttemptLimit}
 	sec.loginSweepAt = now
 	sec.loginMu.Unlock()
 
-	w := e.request("POST", "/dash/api/auth/login", map[string]string{"password": "x"}, nil, "")
-	if w.Code != 429 || w.Header().Get("Retry-After") != loginRetryAfter {
-		t.Fatalf("active-saturated map: %d retry=%q", w.Code, w.Header().Get("Retry-After"))
+	// A fresh caller is not throttled merely because the map is full.
+	fresh := e.security
+	_ = fresh
+	if !sec.loginThrottled(reqFrom(victim)) {
+		t.Fatal("an address at its failed-attempt limit must be throttled")
+	}
+	// Throttling must not depend on map occupancy for an unknown address.
+	if sec.loginThrottled(reqFrom("203.0.113.9")) {
+		t.Fatal("an unknown address must not be throttled for a full map")
+	}
+	sec.loginMu.Lock()
+	_, victimPresent := sec.logins[victim]
+	sec.loginMu.Unlock()
+	if !victimPresent {
+		t.Fatal("bounded eviction dropped the currently-throttled address")
 	}
 }

@@ -47,8 +47,8 @@ func TestAdminDiscoverExplicit(t *testing.T) {
 	defer up.Close()
 
 	body, _ := json.Marshal(map[string]any{
-		"base_url": up.URL + "/v1",
-		"api_key":  "good-key",
+		"base_url": up.URL + "/v1", "allow_private_upstreams": true,
+		"api_key": "good-key",
 	})
 	req := httptest.NewRequest(http.MethodPost, "/dash/api/admin/discover", bytes.NewReader(body))
 	authorizeAdminTest(t, srv, req)
@@ -75,8 +75,8 @@ func TestAdminDiscoverBadKey(t *testing.T) {
 	defer up.Close()
 
 	body, _ := json.Marshal(map[string]any{
-		"base_url": up.URL + "/v1",
-		"api_key":  "wrong",
+		"base_url": up.URL + "/v1", "allow_private_upstreams": true,
+		"api_key": "wrong",
 	})
 	req := httptest.NewRequest(http.MethodPost, "/dash/api/admin/discover", bytes.NewReader(body))
 	authorizeAdminTest(t, srv, req)
@@ -94,7 +94,7 @@ func TestAdminTestOKAndNotFound(t *testing.T) {
 
 	mkBody := func(upstream string) *bytes.Reader {
 		b, _ := json.Marshal(map[string]any{
-			"base_url": up.URL + "/v1",
+			"base_url": up.URL + "/v1", "allow_private_upstreams": true,
 			"api_key":  "good-key",
 			"upstream": upstream,
 		})
@@ -143,8 +143,8 @@ func TestAdminDiscoverViaSavedProvider(t *testing.T) {
 
 	add, _ := json.Marshal(map[string]any{
 		"name":     "acme",
-		"base_url": up.URL + "/v1",
-		"keys":     []string{"good-key"},
+		"base_url": up.URL + "/v1", "allow_private_upstreams": true,
+		"keys": []string{"good-key"},
 	})
 	req := httptest.NewRequest(http.MethodPut, "/dash/api/admin/providers", bytes.NewReader(add))
 	authorizeAdminTest(t, srv, req)

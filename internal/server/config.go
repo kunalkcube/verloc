@@ -35,6 +35,11 @@ type ProviderConfig struct {
 	// upstreams enforce a lower output limit than the model's nominal max
 	// (e.g. Poolside caps at 32768). 0 = no cap.
 	MaxTokens int `json:"max_tokens"`
+	// AllowPrivateUpstreams permits this provider to target a loopback,
+	// link-local or private address. Needed for a legitimately local upstream
+	// (Ollama, llama.cpp, vLLM); without it the wizard probe refuses such a
+	// host so the gateway cannot be used as a blind SSRF relay.
+	AllowPrivateUpstreams bool `json:"allow_private_upstreams"`
 }
 
 // KeyEntry is either a plain API key string (single-account providers like
@@ -473,11 +478,13 @@ func providerFingerprint(p *ProviderConfig) string {
 		SynthesizeCLIHeaders bool       `json:"synthesize_cli_headers"`
 		StripReasoning       *bool      `json:"strip_reasoning_content"`
 		MaxTokens            int        `json:"max_tokens"`
+		AllowPrivate         bool       `json:"allow_private_upstreams"`
 	}{
 		BaseURL: p.BaseURL, APIFormat: p.APIFormat, AuthHeader: p.AuthHeader, AuthHeaderFormat: p.AuthHeaderFormat,
 		Keys: p.Keys, CooldownSeconds: p.CooldownSeconds, RequestTimeout: p.RequestTimeout,
 		NoAuth: p.NoAuth, SynthesizeCLIHeaders: p.SynthesizeCLIHeaders,
 		StripReasoning: p.StripReasoningContent, MaxTokens: p.MaxTokens,
+		AllowPrivate: p.AllowPrivateUpstreams,
 	})
 	return string(b)
 }

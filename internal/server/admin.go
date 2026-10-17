@@ -59,13 +59,27 @@ func (s *Server) applyLive(newCfg *Config) error {
 	if err := s.control.SaveConfig(newCfg); err != nil {
 		return fmt.Errorf("persist management state: %w", err)
 	}
-	s.wirePoolHooks(backends)
-	catalog.SyncFromConfig(newCfg)
-	s.rt.Store(newRuntimeState(newCfg, backends))
-	s.gatewayConfigChanged()
-	if err := s.updateTelemetrySettings(newCfg); err != nil {
-		return fmt.Errorf("configuration committed but analytics settings could not be applied: %w", err)
-	}
+	// Past this point the change is COMMITTED. Every remaining step is
+	// publication, and none of them returns an error — so a panic here would
+	// leave control.db holding the new config while s.rt still serves the old
+	// one, and the next restart would silently "jump" to the committed value
+	// the UI was told had failed. Recover, log loudly, and continue to publish:
+	// an inconsistent-but-published runtime is strictly better than a silent
+	// divergence, and the failure is surfaced rather than swallowed.
+	func() {
+		defer func() {
+			if p := recover(); p != nil {
+				log.Printf("[admin] PANIC while publishing committed config (db and runtime may diverge until the next apply): %v", p)
+			}
+		}()
+		s.wirePoolHooks(backends)
+		catalog.SyncFromConfig(newCfg)
+		s.rt.Store(newRuntimeState(newCfg, backends))
+		s.gatewayConfigChanged()
+		if err := s.updateTelemetrySettings(newCfg); err != nil {
+			log.Printf("[admin] telemetry settings not applied after commit: %v", err)
+		}
+	}()
 	for name, ob := range old.backends {
 		if nb := backends[name]; nb == nil || nb.client != ob.client {
 			ob.client.CloseIdleConnections()
@@ -112,7 +126,10 @@ type providerUpsertReq struct {
 	SynthesizeCLIHeaders bool   `json:"synthesize_cli_headers"`
 	StripReasoning       *bool  `json:"strip_reasoning_content"`
 	MaxTokens            int    `json:"max_tokens"`
-	Disabled             bool   `json:"disabled"`
+	// AllowPrivateUpstreams opts this provider into targeting a loopback /
+	// link-local / private address (see the wizard probe guard).
+	AllowPrivateUpstreams bool `json:"allow_private_upstreams"`
+	Disabled              bool `json:"disabled"`
 	// Keys replaces the provider key list when non-nil (including empty).
 	Keys *[]KeyEntry `json:"keys"`
 	// AppendKeys adds keys without clearing existing ones.

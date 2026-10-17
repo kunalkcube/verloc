@@ -429,7 +429,7 @@ func TestAdminDiscoverAttachesHints(t *testing.T) {
 
 	up := mockUpstream(t)
 	defer up.Close()
-	body, _ := json.Marshal(map[string]any{"base_url": up.URL + "/v1", "api_key": "good-key"})
+	body, _ := json.Marshal(map[string]any{"base_url": up.URL + "/v1", "allow_private_upstreams": true, "api_key": "good-key"})
 	req := httptest.NewRequest(http.MethodPost, "/dash/api/admin/discover", bytes.NewReader(body))
 	authorizeAdminTest(t, srv, req)
 	rec := httptest.NewRecorder()

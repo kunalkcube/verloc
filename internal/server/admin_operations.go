@@ -72,7 +72,7 @@ func applyProviderRequest(cfg *Config, req providerUpsertReq) error {
 	if req.CooldownSeconds < 0 || req.CooldownSeconds > 3600 || req.RequestTimeout < 0 || req.RequestTimeout > 3600 || req.MaxTokens < 0 || req.MaxTokens > 16_777_216 {
 		return fmt.Errorf("provider timeout, cooldown, or output limit is out of range")
 	}
-	p := &ProviderConfig{BaseURL: base, APIFormat: req.APIFormat, AuthHeader: req.AuthHeader, AuthHeaderFormat: req.AuthHeaderFormat, CooldownSeconds: req.CooldownSeconds, RequestTimeout: req.RequestTimeout, NoAuth: req.NoAuth, SynthesizeCLIHeaders: req.SynthesizeCLIHeaders, StripReasoningContent: req.StripReasoning, MaxTokens: req.MaxTokens, Disabled: req.Disabled}
+	p := &ProviderConfig{BaseURL: base, APIFormat: req.APIFormat, AuthHeader: req.AuthHeader, AuthHeaderFormat: req.AuthHeaderFormat, CooldownSeconds: req.CooldownSeconds, RequestTimeout: req.RequestTimeout, NoAuth: req.NoAuth, SynthesizeCLIHeaders: req.SynthesizeCLIHeaders, StripReasoningContent: req.StripReasoning, MaxTokens: req.MaxTokens, AllowPrivateUpstreams: req.AllowPrivateUpstreams, Disabled: req.Disabled}
 	if req.Keys != nil {
 		p.Keys = append([]KeyEntry(nil), (*req.Keys)...)
 	} else if old := cfg.Providers[req.Name]; old != nil {
@@ -114,8 +114,34 @@ func validAuthHeaderName(name string) bool {
 	return name != ""
 }
 
+// safeModelID rejects ids that cannot round-trip through the URL router. Go's
+// mux cleans the path before routing, so a "." or ".." segment (or an empty
+// one from "//") makes DELETE/PUT address a different model than the one
+// stored. Ids are also allowed to arrive via the JSON body, bypassing the URL
+// entirely, so the check must live here rather than in the handler.
+func safeModelID(id string) bool {
+	for seg := range strings.SplitSeq(id, "/") {
+		if seg == "" || seg == "." || seg == ".." || strings.HasPrefix(seg, ".") {
+			return false
+		}
+	}
+	return true
+}
+
+// finitePrice rejects NaN/Inf, which would poison every aggregate they touch
+// (NaN propagates through SUM and compares false against every threshold).
+func finitePrice(v float64) bool {
+	return !math.IsNaN(v) && !math.IsInf(v, 0)
+}
+
+// finitePricePtr applies the guard to optional prices (absent is "unknown",
+// which is legitimate and distinct from a poisoned NaN).
+func finitePricePtr(v *float64) bool {
+	return v == nil || finitePrice(*v)
+}
+
 func applyModelRequest(cfg *Config, req modelUpsertReq, overwrite bool) error {
-	if req.ID == "" || len(req.ID) > 256 || strings.TrimSpace(req.ID) != req.ID || strings.HasPrefix(req.ID, "/") || strings.ContainsAny(req.ID, "?#\r\n\t ") || req.Backend == "" || strings.TrimSpace(req.Upstream) == "" || strings.ContainsAny(req.Upstream, "\r\n") {
+	if req.ID == "" || len(req.ID) > 256 || strings.TrimSpace(req.ID) != req.ID || strings.HasPrefix(req.ID, "/") || strings.ContainsAny(req.ID, "?#\r\n\t ") || !safeModelID(req.ID) || req.Backend == "" || strings.TrimSpace(req.Upstream) == "" || strings.ContainsAny(req.Upstream, "\r\n") {
 		return fmt.Errorf("valid id, backend, and upstream are required")
 	}
 	if _, exists := cfg.ModelMap[req.ID]; exists && !overwrite {
@@ -156,6 +182,9 @@ func applyModelRequest(cfg *Config, req modelUpsertReq, overwrite bool) error {
 		// No published discount means cached input is billed at the input rate,
 		// not free. An explicitly supplied zero remains a real free-cache rate.
 		cachePrice = req.PricingInput
+	}
+	if !finitePricePtr(req.PricingInput) || !finitePricePtr(req.PricingOutput) || !finitePricePtr(req.PricingCache) {
+		return fmt.Errorf("model %q pricing must be a finite number", req.ID)
 	}
 	cfg.ModelMeta[req.ID] = &ModelMeta{Name: req.Name, Description: req.Description, OwnedBy: req.OwnedBy, Upstream: req.Upstream, ContextWindow: req.ContextWindow, MaxTokens: req.MaxTokens, Tags: req.Tags, PricingInput: price(req.PricingInput), PricingOutput: price(req.PricingOutput), PricingCache: price(cachePrice), PricingKnown: &pricingKnown}
 	cfg.DisabledModels[req.ID] = req.Disabled
