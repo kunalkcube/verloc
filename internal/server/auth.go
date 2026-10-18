@@ -13,6 +13,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/netip"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -41,8 +42,10 @@ const (
 )
 
 type SecurityOptions struct {
-	SetupToken    string
-	SecureCookies bool
+	SetupToken     string
+	SecureCookies  bool
+	AllowedHosts   []string
+	TrustedProxies []string
 }
 
 type loginAttempts struct {
@@ -63,13 +66,82 @@ type Security struct {
 	mu           sync.Mutex
 	keys         map[[32]byte]*clientKeyRecord
 	clients      map[string]*clientKeyRecord
+
+	allowedHosts   []string
+	trustedProxies []netip.Prefix
+}
+
+// parseTrustedProxies normalizes IPs and CIDRs into prefixes. Invalid
+// entries are ignored: a typo must not silently trust the world, and the
+// safe failure mode of an unparsed entry is "not trusted".
+func parseTrustedProxies(list []string) []netip.Prefix {
+	var out []netip.Prefix
+	for _, e := range list {
+		e = strings.TrimSpace(e)
+		if p, err := netip.ParsePrefix(e); err == nil {
+			out = append(out, p.Masked())
+			continue
+		}
+		if ip, err := netip.ParseAddr(e); err == nil {
+			out = append(out, netip.PrefixFrom(ip.Unmap(), ip.BitLen()))
+		}
+	}
+	return out
+}
+
+func (s *Security) peerTrusted(r *http.Request) bool {
+	if len(s.trustedProxies) == 0 {
+		return false
+	}
+	host, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil {
+		host = r.RemoteAddr
+	}
+	ip, err := netip.ParseAddr(host)
+	if err != nil {
+		return false
+	}
+	ip = ip.Unmap()
+	for _, p := range s.trustedProxies {
+		if p.Contains(ip) {
+			return true
+		}
+	}
+	return false
+}
+
+// requestSecure reports whether this request effectively arrived over
+// HTTPS: directly (TLS), by explicit configuration, or via a TRUSTED
+// proxy that says so. Forwarded headers from untrusted peers are ignored.
+func (s *Security) requestSecure(r *http.Request) bool {
+	if r.TLS != nil || s.options.SecureCookies {
+		return true
+	}
+	return s.peerTrusted(r) && strings.EqualFold(r.Header.Get("X-Forwarded-Proto"), "https")
+}
+
+func (s *Security) hostAllowed(host string) bool {
+	if len(s.allowedHosts) == 0 {
+		return true
+	}
+	h, _, err := net.SplitHostPort(host)
+	if err != nil {
+		h = host
+	}
+	for _, a := range s.allowedHosts {
+		if strings.EqualFold(a, host) || strings.EqualFold(a, h) {
+			return true
+		}
+	}
+	return false
 }
 
 func NewSecurity(control *ControlStore, options SecurityOptions) (*Security, error) {
 	if control == nil || control.db == nil {
 		return nil, errors.New("security requires a control database")
 	}
-	s := &Security{control: control, options: options, logins: make(map[string]loginAttempts), loginSlots: make(chan struct{}, 2), keys: make(map[[32]byte]*clientKeyRecord), clients: make(map[string]*clientKeyRecord)}
+	s := &Security{control: control, options: options, logins: make(map[string]loginAttempts), loginSlots: make(chan struct{}, 2), keys: make(map[[32]byte]*clientKeyRecord), clients: make(map[string]*clientKeyRecord),
+		allowedHosts: options.AllowedHosts, trustedProxies: parseTrustedProxies(options.TrustedProxies)}
 	var count int
 	if err := control.db.QueryRow("SELECT count(*) FROM admin_auth WHERE id=1").Scan(&count); err != nil {
 		return nil, fmt.Errorf("load owner authentication: %w", err)
@@ -204,6 +276,12 @@ func (s *Security) securityOriginOK(r *http.Request) bool {
 	if !unsafeSecurityMethod(r.Method) {
 		return true
 	}
+	// With an allowlist configured, the Host itself must be expected —
+	// otherwise DNS rebinding satisfies the origin comparison below,
+	// which only ever echoes the request's own Host back at it.
+	if !s.hostAllowed(r.Host) {
+		return false
+	}
 	if site := r.Header.Get("Sec-Fetch-Site"); site != "" && site != "same-origin" && site != "none" {
 		return false
 	}
@@ -213,7 +291,7 @@ func (s *Security) securityOriginOK(r *http.Request) bool {
 	}
 	u, err := url.Parse(origin)
 	scheme := "http"
-	if r.TLS != nil || s.options.SecureCookies {
+	if s.requestSecure(r) {
 		scheme = "https"
 	}
 	return err == nil && u.Scheme == scheme && strings.EqualFold(u.Host, r.Host) && u.User == nil && u.RawQuery == "" && u.Fragment == "" && u.Path == ""
@@ -329,7 +407,7 @@ func (s *Security) handleAuthSession(w http.ResponseWriter, r *http.Request) {
 // (and behind a reverse proxy every client shares one address). Throttling
 // failures preserves brute-force resistance without that denial.
 func (s *Security) loginThrottled(r *http.Request) bool {
-	ip := loginAddr(r)
+	ip := s.loginAddr(r)
 	now := time.Now()
 	s.loginMu.Lock()
 	defer s.loginMu.Unlock()
@@ -349,7 +427,7 @@ func (s *Security) loginThrottled(r *http.Request) bool {
 
 // noteLoginFailure records one failed attempt for the caller's address.
 func (s *Security) noteLoginFailure(r *http.Request) {
-	ip := loginAddr(r)
+	ip := s.loginAddr(r)
 	now := time.Now()
 	s.loginMu.Lock()
 	defer s.loginMu.Unlock()
@@ -384,16 +462,28 @@ func (s *Security) noteLoginFailure(r *http.Request) {
 // clearLoginFailures drops the caller's failure record after a success, so a
 // legitimate owner is never penalised for earlier typos.
 func (s *Security) clearLoginFailures(r *http.Request) {
-	ip := loginAddr(r)
+	ip := s.loginAddr(r)
 	s.loginMu.Lock()
 	delete(s.logins, ip)
 	s.loginMu.Unlock()
 }
 
-func loginAddr(r *http.Request) string {
+// loginAddr is the throttle bucket key. Behind a TRUSTED proxy the real
+// client is the first X-Forwarded-For entry — otherwise every client
+// behind one proxy shares the proxy's bucket and one attacker locks the
+// owner out. Forwarded headers from untrusted peers are never believed.
+func (s *Security) loginAddr(r *http.Request) string {
 	ip, _, err := net.SplitHostPort(r.RemoteAddr)
 	if err != nil {
-		return r.RemoteAddr
+		ip = r.RemoteAddr
+	}
+	if s.peerTrusted(r) {
+		if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
+			first := strings.TrimSpace(strings.Split(xff, ",")[0])
+			if parsed, err := netip.ParseAddr(first); err == nil {
+				return parsed.Unmap().String()
+			}
+		}
 	}
 	return ip
 }
@@ -612,7 +702,7 @@ func (s *Security) insertSession(tx *sql.Tx) (string, string, error) {
 }
 
 func (s *Security) sessionCookie(r *http.Request, token string) *http.Cookie {
-	return &http.Cookie{Name: ownerSessionCookie, Value: token, Path: "/", HttpOnly: true, Secure: s.options.SecureCookies || r.TLS != nil, SameSite: http.SameSiteStrictMode, MaxAge: int(ownerSessionLifetime.Seconds())}
+	return &http.Cookie{Name: ownerSessionCookie, Value: token, Path: "/", HttpOnly: true, Secure: s.requestSecure(r), SameSite: http.SameSiteStrictMode, MaxAge: int(ownerSessionLifetime.Seconds())}
 }
 
 func (s *Security) respondSession(w http.ResponseWriter, r *http.Request, token, csrf string) {

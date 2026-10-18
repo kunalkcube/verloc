@@ -84,10 +84,18 @@ func (k KeyEntry) MarshalJSON() ([]byte, error) {
 }
 
 type Config struct {
-	ManagementDB     string                   `json:"management_db,omitempty"`
-	MasterKeyFile    string                   `json:"master_key_file,omitempty"`
-	SetupTokenFile   string                   `json:"setup_token_file,omitempty"`
-	SecureCookies    bool                     `json:"secure_cookies,omitempty"`
+	ManagementDB   string `json:"management_db,omitempty"`
+	MasterKeyFile  string `json:"master_key_file,omitempty"`
+	SetupTokenFile string `json:"setup_token_file,omitempty"`
+	SecureCookies  bool   `json:"secure_cookies,omitempty"`
+	// AllowedHosts, when set, is the Host allowlist for dashboard writes
+	// (defeats DNS-rebinding, which otherwise satisfies an origin check
+	// that echoes the request's own Host). Empty means no restriction.
+	AllowedHosts []string `json:"allowed_hosts,omitempty"`
+	// TrustedProxies lists proxy addresses/CIDRs whose X-Forwarded-For /
+	// X-Forwarded-Proto headers may be believed (login throttling keys and
+	// cookie Secure decisions). Empty means forwarded headers are ignored.
+	TrustedProxies   []string                 `json:"trusted_proxies,omitempty"`
 	DisabledModels   map[string]bool          `json:"disabled_models,omitempty"`
 	ModelRoutes      map[string][]RouteTarget `json:"model_routes,omitempty"`
 	Limits           GatewayLimits            `json:"limits,omitempty"`

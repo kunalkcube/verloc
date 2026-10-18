@@ -206,7 +206,7 @@ func openGateway(seed *Config, configPath string) (*Server, error) {
 		_ = control.Close()
 		return nil, fmt.Errorf("setup token: %w", err)
 	}
-	srv.security, err = NewSecurity(control, SecurityOptions{SetupToken: setupToken, SecureCookies: seed.SecureCookies})
+	srv.security, err = NewSecurity(control, SecurityOptions{SetupToken: setupToken, SecureCookies: seed.SecureCookies, AllowedHosts: seed.AllowedHosts, TrustedProxies: seed.TrustedProxies})
 	if err != nil {
 		_ = control.Close()
 		return nil, fmt.Errorf("security: %w", err)
