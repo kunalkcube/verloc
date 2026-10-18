@@ -46,10 +46,17 @@ func Run() {
 	exportBootstrap := flag.String("export-bootstrap", "", "write a new secret-free bootstrap file after import and exit")
 	pruneAlerts := flag.Bool("prune-alerts", false, "collapse stored alert history to the configured cooldown and exit")
 	pruneFailed := flag.Bool("prune-failed-requests", false, "delete failed (ok=0) request rows from the analytics database and exit")
-	applyPrune := flag.Bool("apply", false, "with -prune-alerts or -prune-failed-requests, actually write the change instead of only reporting it")
+	zeroErrors := flag.Bool("zero-error-counters", false, "rewrite recorded error counters out of snapshot history, rebuild rollups and totals, and exit")
+	applyPrune := flag.Bool("apply", false, "with -prune-alerts, -prune-failed-requests or -zero-error-counters, actually write the change instead of only reporting it")
 	flag.Parse()
-	if *pruneAlerts && *pruneFailed {
-		log.Fatal("choose only one of -prune-alerts or -prune-failed-requests")
+	chosen := 0
+	for _, b := range []*bool{pruneAlerts, pruneFailed, zeroErrors} {
+		if *b {
+			chosen++
+		}
+	}
+	if chosen > 1 {
+		log.Fatal("choose only one of -prune-alerts, -prune-failed-requests, or -zero-error-counters")
 	}
 
 	cfg, err := loadBootstrap(*configPath)
@@ -132,6 +139,34 @@ func Run() {
 		}
 		log.Printf("requests: %d rows total, %d failed (ts %d..%d)", stats.Total, stats.Failed, stats.OldestTs, stats.NewestTs)
 		if !*applyPrune {
+			log.Printf("dry run: nothing written. Re-run with -apply to commit (back up first).")
+		}
+		_ = srv.Close()
+		return
+	}
+	if *zeroErrors {
+		if srv.store == nil {
+			_ = srv.Close()
+			log.Fatal("no analytics database is open; nothing to rewrite")
+		}
+		stats, err := srv.store.ZeroErrorCounters(!*applyPrune)
+		if err != nil {
+			_ = srv.Close()
+			log.Fatalf("zero error counters: %v", err)
+		}
+		log.Printf("snapshots: %d ticks, %d carried errors (%d error records), %d legacy hourly rows", stats.Ticks, stats.TicksWithErr, stats.ErrSum, stats.LegacyRows)
+		if *applyPrune {
+			minutes, err := srv.store.RebuildRollups(context.Background())
+			if err != nil {
+				_ = srv.Close()
+				log.Fatalf("rebuild rollups: %v", err)
+			}
+			if err := srv.store.RebuildTotals(); err != nil {
+				_ = srv.Close()
+				log.Fatalf("rebuild totals: %v", err)
+			}
+			log.Printf("rebuilt %d minute rollups and lifetime totals", minutes)
+		} else {
 			log.Printf("dry run: nothing written. Re-run with -apply to commit (back up first).")
 		}
 		_ = srv.Close()

@@ -600,6 +600,119 @@ func (s *Store) PruneFailedRequests(dryRun bool) (PruneFailedStats, error) {
 	return stats, tx.Commit()
 }
 
+// ZeroErrorCountersStats reports the outcome of ZeroErrorCounters.
+type ZeroErrorCountersStats struct {
+	Ticks        int64 // total snapshot rows
+	TicksWithErr int64 // rows whose d_err carried a nonzero error count
+	ErrSum       int64 // total error count removed
+	LegacyRows   int64 // legacy_hourly rows whose error column was zeroed
+}
+
+// ZeroErrorCounters rewrites recorded error accounting out of the snapshot
+// history: d_err and the per-model / per-backend "err" fields inside the
+// dimension blobs are set to zero, and legacy_hourly error columns are zeroed.
+// Traffic, token and cost history are untouched. Callers must rebuild the
+// derived state afterwards (RebuildRollups + RebuildTotals) so the minute
+// rollup and lifetime totals agree with the corrected ticks.
+//
+// This is an explicit owner maintenance action that REWRITES recorded
+// analytics history — the opposite of the default "history is never
+// rewritten" policy — and exists only for that; nothing on the request path
+// calls it. One committed transaction; with dryRun nothing is written and
+// only the counts are reported.
+func (s *Store) ZeroErrorCounters(dryRun bool) (ZeroErrorCountersStats, error) {
+	stats := ZeroErrorCountersStats{}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if err := s.db.QueryRow(`SELECT COUNT(*),
+			COALESCE(SUM(CASE WHEN d_err != 0 THEN 1 ELSE 0 END),0),
+			COALESCE(SUM(d_err),0)
+			FROM snapshots`).Scan(&stats.Ticks, &stats.TicksWithErr, &stats.ErrSum); err != nil {
+		return stats, err
+	}
+	if err := s.db.QueryRow(`SELECT COUNT(*) FROM legacy_hourly WHERE errors != 0`).Scan(&stats.LegacyRows); err != nil {
+		return stats, err
+	}
+	if dryRun || (stats.TicksWithErr == 0 && stats.LegacyRows == 0) {
+		return stats, nil
+	}
+	tx, err := s.db.Begin()
+	if err != nil {
+		return stats, err
+	}
+	defer tx.Rollback()
+	// ts is the snapshots primary key, so a per-row UPDATE by ts is exact.
+	rows, err := tx.Query(`SELECT ts, d_models, d_backends FROM snapshots WHERE d_err != 0`)
+	if err != nil {
+		return stats, err
+	}
+	type dimRow struct {
+		ts               int64
+		models, backends string
+		hasBlobs         bool
+	}
+	var dim []dimRow
+	for rows.Next() {
+		var r dimRow
+		var m, b any
+		if err := rows.Scan(&r.ts, &m, &b); err != nil {
+			rows.Close()
+			return stats, err
+		}
+		if ms, ok := m.(string); ok {
+			r.models, r.hasBlobs = ms, true
+		}
+		if bs, ok := b.(string); ok {
+			r.backends, r.hasBlobs = bs, true
+		}
+		dim = append(dim, r)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return stats, err
+	}
+	rows.Close()
+	for _, r := range dim {
+		models, backends := r.models, r.backends
+		if r.hasBlobs {
+			var mm map[string]deltaModel
+			var bb map[string]deltaBackend
+			_ = json.Unmarshal([]byte(r.models), &mm)
+			_ = json.Unmarshal([]byte(r.backends), &bb)
+			changed := false
+			for k, v := range mm {
+				if v.Err != 0 {
+					v.Err = 0
+					mm[k] = v
+					changed = true
+				}
+			}
+			for k, v := range bb {
+				if v.Err != 0 {
+					v.Err = 0
+					bb[k] = v
+					changed = true
+				}
+			}
+			if changed {
+				if mj, err := json.Marshal(mm); err == nil {
+					models = string(mj)
+				}
+				if bj, err := json.Marshal(bb); err == nil {
+					backends = string(bj)
+				}
+			}
+		}
+		if _, err := tx.Exec(`UPDATE snapshots SET d_err=0, d_models=?, d_backends=? WHERE ts=?`, models, backends, r.ts); err != nil {
+			return stats, err
+		}
+	}
+	if _, err := tx.Exec(`UPDATE legacy_hourly SET errors=0 WHERE errors != 0`); err != nil {
+		return stats, err
+	}
+	return stats, tx.Commit()
+}
+
 // RecentKeyEvents returns the last n key events, newest first.
 func (s *Store) RecentKeyEvents(n int) []KeyEvent {
 	rows, err := s.db.Query(`SELECT ts, backend, key, event, status, msg FROM key_events ORDER BY ts DESC,id DESC LIMIT ?`, n)
