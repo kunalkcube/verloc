@@ -76,6 +76,24 @@ const maxNonStreamBody = int64(64 << 20)
 
 var nonStreamMemLimit = int64(8 << 20) // var so tests can shrink it
 
+// spillTempDir is where oversized non-stream bodies spill. It must be
+// DISK-backed: /tmp is tmpfs (RAM) on typical hosts, including the
+// production box, so spilling there would defeat the point. Set once at
+// server construction to the analytics DB's directory; empty falls back
+// to os.TempDir.
+var spillTempDir string
+
+func setSpillTempDir(dir string) { spillTempDir = dir }
+
+func createSpillFile() (*os.File, error) {
+	if spillTempDir != "" {
+		if f, err := os.CreateTemp(spillTempDir, "verloc-body-*"); err == nil {
+			return f, nil
+		}
+	}
+	return os.CreateTemp("", "verloc-body-*")
+}
+
 type spillBody struct {
 	mem      []byte // prefix, up to nonStreamMemLimit
 	file     *os.File
@@ -99,7 +117,7 @@ func readSpillBody(r io.Reader) (*spillBody, error) {
 					// This chunk crosses the memory limit: mem keeps the
 					// prefix, the remainder starts the spill file.
 					b.mem = append(b.mem, data[:int(room)]...)
-					f, ferr := os.CreateTemp("", "verloc-body-*")
+					f, ferr := createSpillFile()
 					if ferr != nil {
 						return b, ferr
 					}
@@ -157,12 +175,37 @@ func (b *spillBody) validJSON() bool {
 	if b.file == nil {
 		return json.Valid(b.mem)
 	}
+	// Stream tokens instead of decoding: Decode(&any) would materialize
+	// the entire JSON tree (measured +611 MB heap on a 52 MB body),
+	// defeating the spill. A token drain validates syntax in O(depth)
+	// memory. It must also reject trailing content after the top-level
+	// value, which json.Valid does and a naive token loop would not.
 	dec := json.NewDecoder(b.reader())
-	var v any
-	if err := dec.Decode(&v); err != nil {
-		return false
+	dec.UseNumber() // Token must not range-check numbers into float64
+	depth := 0
+	completed := false
+	for {
+		tok, err := dec.Token()
+		if err == io.EOF {
+			return completed && depth == 0
+		}
+		if err != nil || completed {
+			return false
+		}
+		if delim, ok := tok.(json.Delim); ok {
+			switch delim {
+			case '{', '[':
+				depth++
+			case '}', ']':
+				depth--
+				if depth == 0 {
+					completed = true
+				}
+			}
+		} else if depth == 0 {
+			completed = true // scalar top-level value
+		}
 	}
-	return dec.Decode(&v) == io.EOF
 }
 
 func (b *spillBody) close() {

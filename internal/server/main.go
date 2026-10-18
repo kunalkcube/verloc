@@ -30,6 +30,9 @@ func NewServer(cfg *Config) (*Server, error) {
 		return nil, err
 	}
 	catalog.SyncFromConfig(cfg)
+	if cfg.Dashboard != nil && cfg.Dashboard.DBPath != "" && cfg.Dashboard.DBPath != ":memory:" {
+		setSpillTempDir(filepath.Dir(cfg.Dashboard.DBPath))
+	}
 	s := &Server{metrics: NewMetrics(), reasonCache: newReasoningCache(maxReasoningEntries), hints: newHintResolver()}
 	s.rt.Store(newRuntimeState(cfg, backends))
 	s.initGateway()
