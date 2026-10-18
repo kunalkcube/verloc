@@ -43,16 +43,6 @@ const emptyMeta = (upstream: string): WizMeta => ({
   pi: '', po: '', pc: '', ctx: '', mx: '', src: '',
 });
 
-const PRESETS: Record<string, { name: string; url: string; apiFormat?: 'openai' | 'systemone'; noAuth?: boolean; synth?: boolean; hint: string }> = {
-  openai: { name: 'openai', url: 'https://api.openai.com/v1', hint: 'Any OpenAI-compatible endpoint works here.' },
-  openrouter: { name: 'openrouter', url: 'https://openrouter.ai/api/v1', hint: 'Unified gateway; upstream ids look like org/model.' },
-  vercel: { name: 'vercel', url: 'https://ai-gateway.vercel.sh/v1', hint: 'Vercel AI Gateway OpenAI-compatible base.' },
-  cloudflare: { name: 'cloudflare', url: 'https://api.cloudflare.com/client/v4/accounts/%ACCOUNT%/ai/v1', hint: 'Replace %ACCOUNT% with your account id; keys use account_id:api_key lines.' },
-  typesafe: { name: 'typesafe', url: 'https://api.typesafe.ai/v1', apiFormat: 'systemone', hint: 'Jev typed questions use /v1/systemone, not chat completions.' },
-  opencode: { name: 'opencode', url: 'https://opencode.ai/zen/v1', noAuth: true, hint: 'Keyless endpoint — no_auth is ticked automatically.' },
-  custom: { name: '', url: '', hint: 'Any OpenAI-compatible base URL starting with http(s)://.' },
-};
-
 function existingPrefixes(providers: { name: string }[], models: { id: string }[]): Set<string> {
   const s = new Set<string>();
   for (const p of providers) if (p.name) s.add(p.name);
@@ -734,34 +724,6 @@ export default function Admin({ state, section }: TabProps & { section: Section 
                   <div className="flex items-center gap-3 border-b border-edge-700 pb-2 text-[10px] uppercase tracking-[0.14em]">
                     <span className="text-primary">01 / Endpoint</span><span className="text-muted-foreground">Provider connection</span>
                   </div>
-                  <Field>
-                    <FieldLabel>Provider preset</FieldLabel>
-                    <Select
-                      value=""
-                      onValueChange={(key) => {
-                        const preset = PRESETS[key ?? ''];
-                        if (!preset) return;
-                        setWName(preset.name); setWBase(preset.url);
-                        setWNoAuth(!!preset.noAuth); setWSynth(!!preset.synth);
-                        setWAPIFormat(preset.apiFormat || 'openai');
-                        setWAuthH(''); setWAuthF('');
-                      }}
-                    >
-                      <SelectTrigger aria-label="Provider preset">
-                        <SelectValue placeholder="Choose a preset…" />
-                      </SelectTrigger>
-                      <SelectContent>
-                        <SelectItem value="openai">OpenAI-compatible</SelectItem>
-                        <SelectItem value="openrouter">OpenRouter</SelectItem>
-                        <SelectItem value="vercel">Vercel AI Gateway</SelectItem>
-                        <SelectItem value="cloudflare">Cloudflare Workers AI</SelectItem>
-                        <SelectItem value="typesafe">TypeSafe Jev (System One)</SelectItem>
-                        <SelectItem value="opencode">OpenCode (keyless)</SelectItem>
-                        <SelectItem value="custom">Custom endpoint</SelectItem>
-                      </SelectContent>
-                    </Select>
-                    <FieldDescription>Presets fill name, base URL, and keyless flags. Cloudflare uses %ACCOUNT% in the URL plus account_id:api_key lines.</FieldDescription>
-                  </Field>
 
                   <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
                     <Field>
