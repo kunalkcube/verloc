@@ -106,6 +106,10 @@ export default function ClientKeys() {
       setFormError('Enter a name, a future expiry (or switch expiry off), and non-negative integer limits.');
       return;
     }
+    if (!draft.allowed_models.includes('*') && draft.allowed_models.length === 0) {
+      setFormError('Select at least one model, or switch All models on.');
+      return;
+    }
     setBusy(true);
     setFormError('');
     try {
@@ -377,14 +381,21 @@ export default function ClientKeys() {
                     id="key-all-models"
                     checked={allModels}
                     onCheckedChange={(v) => {
-                      if (v === true) setDraft({ ...draft, allowed_models: ['*'] });
-                      else setDraft({ ...draft, allowed_models: models.map((m) => m.id) });
+                      setDraft({ ...draft, allowed_models: v === true ? ['*'] : [] });
                     }}
                   />
                 </div>
                 {!allModels && (
                   <div className="max-h-72 space-y-3 overflow-y-auto border border-edge-700 bg-edge-950 p-4">
-                    <FieldDescription>Select specific models to restrict access. Disabled models remain unavailable.</FieldDescription>
+                    <div className="flex flex-wrap items-center justify-between gap-2">
+                      <FieldDescription>Select specific models to restrict access. Disabled models remain unavailable.</FieldDescription>
+                      <span className={draft.allowed_models.length > 0 ? 'text-[10px] text-primary' : 'text-[10px] text-muted-foreground'}>
+                        {draft.allowed_models.length} selected
+                      </span>
+                    </div>
+                    {draft.allowed_models.length === 0 && (
+                      <p className="text-xs text-chart-4">Nothing selected — pick at least one model, or switch All models back on.</p>
+                    )}
                     {scopeIds.map((id) => (
                       <Label key={id} className="flex min-w-0 cursor-pointer items-start gap-2 font-normal">
                         <Checkbox

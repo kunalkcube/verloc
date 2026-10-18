@@ -473,6 +473,8 @@ export default function Admin({ state, section }: TabProps & { section: Section 
     return wDiscovered.filter((m) => `${m.id} ${m.owned_by || ''}`.toLowerCase().includes(q));
   }, [wDiscovered, wFilter]);
 
+  const wizAllFilteredSelected = wizFiltered.length > 0 && wizFiltered.every((m) => !!wSel[m.id]);
+
   const wizTestRow = (upstream: string) => {
     const conn = wizProbeConn();
     setWTesting((p) => ({ ...p, [upstream]: true }));
@@ -892,7 +894,21 @@ export default function Admin({ state, section }: TabProps & { section: Section 
                 <Table className="min-w-[680px]">
                   <TableHeader>
                     <TableRow>
-                      <TableHead className="w-10">Pick</TableHead>
+                      <TableHead className="w-10">
+                        <Checkbox
+                          aria-label="Select or unselect all filtered models"
+                          checked={wizAllFilteredSelected}
+                          onCheckedChange={(v) => {
+                            const on = v === true;
+                            if (on) wizFiltered.forEach((m) => wizEnsureRow(m.id, wizProviderName || 'xx', m.hint));
+                            setWSel((prev) => {
+                              const next = { ...prev };
+                              wizFiltered.forEach((m) => { next[m.id] = on; });
+                              return next;
+                            });
+                          }}
+                        />
+                      </TableHead>
                       <TableHead>Upstream model</TableHead>
                       <TableHead>Verloc id</TableHead>
                       <TableHead>Display name</TableHead>
