@@ -31,10 +31,13 @@ func TestRequestsRestartFiltersCursorAndUnknownUsage(t *testing.T) {
 	b.CostKnown = false
 	b.TokIn = 999
 	b.Cost = 999
-	// Neither durable rows, recent records, nor live events may carry error bodies.
+	// Error bodies and RAW credentials may never persist; client IP,
+	// User-Agent and the masked credential are intentional tracing
+	// metadata and do.
 	b.ErrMsg = "secret-upstream-body"
-	b.Key = "secret-upstream-body"
-	b.UA = "secret-upstream-body"
+	b.Key = "sk-raw-credential-1234"
+	b.IP = "203.0.113.7"
+	b.UA = "opencode/1.0"
 	b.AttemptLog = []RequestAttempt{{Backend: "provider-a", Status: 502, Outcome: "secret-upstream-body", LatMs: 5}}
 	if !s.QueueRequest(a) || !s.QueueRequest(b) {
 		t.Fatal("unexpected telemetry drop")
@@ -65,15 +68,18 @@ func TestRequestsRestartFiltersCursorAndUnknownUsage(t *testing.T) {
 		t.Fatalf("before-limit known totals: %+v", page.Summary)
 	}
 	raw, _ := json.Marshal(page.Requests)
-	if strings.Contains(string(raw), "secret-upstream-body") {
+	if strings.Contains(string(raw), "secret-upstream-body") || strings.Contains(string(raw), "sk-raw-credential-1234") {
 		t.Fatalf("unsafe metadata leaked: %s", raw)
 	}
 	var persisted string
 	if err = s.db.QueryRow(`SELECT record FROM requests WHERE request_id='b'`).Scan(&persisted); err != nil {
 		t.Fatal(err)
 	}
-	if strings.Contains(persisted, "secret-upstream-body") {
+	if strings.Contains(persisted, "secret-upstream-body") || strings.Contains(persisted, "sk-raw-credential-1234") {
 		t.Fatal("unsafe metadata persisted")
+	}
+	if !strings.Contains(persisted, `"ip":"203.0.113.7"`) || !strings.Contains(persisted, `"ua":"opencode/1.0"`) || !strings.Contains(persisted, `"key":"...1234"`) {
+		t.Fatalf("tracing metadata missing from persisted record: %s", persisted)
 	}
 	c := analyticsRecord(a.TS, "c")
 	if err = s.insertRequests([]ReqRecord{c}); err != nil {
@@ -302,12 +308,16 @@ func TestHubCloseAndLiveSanitization(t *testing.T) {
 	r := analyticsRecord(1, "one")
 	r.OK = false
 	r.ErrMsg = "unsafe-content"
-	r.Key = "unsafe-content"
+	r.Key = "sk-live-credential-9876"
+	r.IP = "198.51.100.9"
 	h.Publish(map[string]any{"type": "req", "req": r})
 	msg := <-ch
 	raw, _ := json.Marshal(msg)
-	if strings.Contains(string(raw), "unsafe-content") {
-		t.Fatal("live stream leaked content")
+	if strings.Contains(string(raw), "unsafe-content") || strings.Contains(string(raw), "sk-live-credential-9876") {
+		t.Fatal("live stream leaked content or raw credential")
+	}
+	if !strings.Contains(string(raw), `"ip":"198.51.100.9"`) || !strings.Contains(string(raw), `"key":"...9876"`) {
+		t.Fatalf("live stream dropped tracing metadata: %s", raw)
 	}
 	h.Close()
 	h.Close()

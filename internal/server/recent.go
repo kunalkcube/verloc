@@ -45,10 +45,18 @@ type RequestAttempt struct {
 }
 
 // sanitizeRecord is shared by persistence, the recent ring, and live events.
-// Error text from upstreams may contain credentials or submitted content.
+// It is the single policy gate for what request metadata may leave the hot
+// path: raw error text never survives (upstream bodies may echo credentials
+// or submitted content), and the upstream credential is coerced to its masked
+// suffix form here as well as at capture, so a future caller cannot persist
+// a raw key by forgetting to pre-mask it. Client IP, truncated User-Agent,
+// and the masked credential are kept — they are the multi-agent tracing
+// metadata the request detail view exists to show.
 func sanitizeRecord(r ReqRecord) ReqRecord {
 	r.ErrMsg = ""
-	r.IP, r.UA, r.Key = "", "", ""
+	if r.Key != "" {
+		r.Key = maskKey(r.Key) // idempotent: re-masking "…abcd" is a no-op
+	}
 	if !r.OK {
 		r.ErrMsg = "Request did not complete successfully"
 	}
