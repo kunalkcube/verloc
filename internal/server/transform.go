@@ -125,11 +125,12 @@ func remapBody(raw []byte, upstreamModel string, isMistral bool, backendName str
 							continue
 						}
 						t, _ := pm["type"].(string)
-						if t == "" || t == "text" {
+						switch t {
+						case "", "text":
 							if txt, ok := pm["text"].(string); ok {
 								textParts = append(textParts, txt)
 							}
-						} else if t == "tool_use" {
+						case "tool_use":
 							id, _ := pm["id"].(string)
 							name, _ := pm["name"].(string)
 							input := pm["input"]

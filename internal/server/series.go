@@ -5,6 +5,11 @@ import (
 	"encoding/json"
 )
 
+// SeriesSince returns snapshots in [sinceMs, +∞) oldest-first. When the
+// result exceeds maxPoints it is downsampled in SQL into equal-width
+// buckets. Per-model and per-backend JSON is folded in only from ticks
+// that had traffic, so a year of idle 3s rows does not have to be parsed.
+// ctx cancels the scan so a newer window can take the DB lock.
 func (s *Store) SeriesSince(ctx context.Context, sinceMs int64, maxPoints int) ([]SeriesRow, error) {
 	if maxPoints < 1 {
 		maxPoints = 500

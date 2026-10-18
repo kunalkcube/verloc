@@ -425,11 +425,7 @@ func (s *Store) QueueKeyEvent(ts int64, backend, key, event string, status int, 
 
 func (s *Store) DroppedKeyEvents() uint64 { return s.keyEvDrop.Load() }
 
-// SeriesSince returns snapshots in [sinceMs, +∞) oldest-first. When the
-// result exceeds maxPoints it is downsampled in SQL into equal-width
-// buckets. Per-model and per-backend JSON is folded in only from ticks
-// that had traffic, so a year of idle 3s rows does not have to be parsed.
-// ctx cancels the scan so a newer window can take the DB lock.
+// RecentAlerts returns the last n alert events, newest first.
 func (s *Store) RecentAlerts(n int) []AlertEvent {
 	rows, err := s.db.Query(`SELECT ts, rule_id, name, severity, scope, metric, value, threshold, message
 	                        FROM alerts ORDER BY ts DESC LIMIT ?`, n)
@@ -444,6 +440,9 @@ func (s *Store) RecentAlerts(n int) []AlertEvent {
 			out = append(out, a)
 		}
 	}
+	// Best-effort read: a driver error mid-scan yields the partial list
+	// rather than failing the dashboard panel.
+	_ = rows.Err()
 	return out
 }
 
@@ -553,6 +552,54 @@ func (s *Store) CollapseAlertHistory(cooldownSec int, dryRun bool) (AlertCollaps
 	return stats, tx.Commit()
 }
 
+// PruneFailedStats reports the outcome of PruneFailedRequests.
+type PruneFailedStats struct {
+	Total    int64
+	Failed   int64
+	OldestTs int64
+	NewestTs int64
+}
+
+// PruneFailedRequests deletes every failed request row (ok=0: errors, cancels,
+// upstream rejections) from the requests table. Failed outcomes are recorded
+// metadata like any other request, so this exists only as an explicit owner
+// maintenance action; nothing on the request path calls it.
+//
+// Derived state is intentionally left alone: request_hourly is an additive
+// legacy-coverage tier for pruned history, and the snapshot tick tables are
+// historical captures that cannot be re-derived from raw rows. Only
+// detail-level reads (the Requests list and attributed analytics) reflect the
+// deletion.
+//
+// One committed transaction; with dryRun nothing is written and only the
+// counts are reported.
+func (s *Store) PruneFailedRequests(dryRun bool) (PruneFailedStats, error) {
+	stats := PruneFailedStats{}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if err := s.db.QueryRow(`SELECT COUNT(*), COALESCE(SUM(ok=0),0),
+			COALESCE(MIN(CASE WHEN ok=0 THEN ts END),0), COALESCE(MAX(CASE WHEN ok=0 THEN ts END),0)
+			FROM requests`).Scan(&stats.Total, &stats.Failed, &stats.OldestTs, &stats.NewestTs); err != nil {
+		return stats, err
+	}
+	if dryRun || stats.Failed == 0 {
+		return stats, nil
+	}
+	tx, err := s.db.Begin()
+	if err != nil {
+		return stats, err
+	}
+	defer tx.Rollback()
+	res, err := tx.Exec(`DELETE FROM requests WHERE ok=0`)
+	if err != nil {
+		return stats, err
+	}
+	if n, err := res.RowsAffected(); err == nil && n > 0 {
+		stats.Failed = n
+	}
+	return stats, tx.Commit()
+}
+
 // RecentKeyEvents returns the last n key events, newest first.
 func (s *Store) RecentKeyEvents(n int) []KeyEvent {
 	rows, err := s.db.Query(`SELECT ts, backend, key, event, status, msg FROM key_events ORDER BY ts DESC,id DESC LIMIT ?`, n)
@@ -569,6 +616,8 @@ func (s *Store) RecentKeyEvents(n int) []KeyEvent {
 			out = append(out, e)
 		}
 	}
+	// Best-effort read: same partial-list semantics as RecentAlerts.
+	_ = rows.Err()
 	return out
 }
 

@@ -65,6 +65,9 @@ func TestRollupMatchesRawTicksRebuiltFromScratch(t *testing.T) {
 			}
 			out[m] = b
 		}
+		if err := rows.Err(); err != nil {
+			t.Fatal(err)
+		}
 		return out
 	}
 

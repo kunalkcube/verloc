@@ -104,7 +104,7 @@ func (f RequestFilter) where(rollup bool) (string, []any) {
 }
 
 func encodeCursor(ts, seq int64) string {
-	return base64.RawURLEncoding.EncodeToString([]byte(fmt.Sprintf("%d:%d", ts, seq)))
+	return base64.RawURLEncoding.EncodeToString(fmt.Appendf(nil, "%d:%d", ts, seq))
 }
 func decodeCursor(v string) (int64, int64, error) {
 	raw, err := base64.RawURLEncoding.DecodeString(v)

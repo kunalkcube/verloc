@@ -225,6 +225,9 @@ func TestQueryPlans(t *testing.T) {
 				out = append(out, detail)
 			}
 		}
+		if err := rows.Err(); err != nil {
+			return []string{"ERR: " + err.Error()}
+		}
 		return out
 	}
 

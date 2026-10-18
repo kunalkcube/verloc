@@ -45,8 +45,12 @@ func Run() {
 	restoreDir := flag.String("restore", "", "restore a backup into new database paths and exit")
 	exportBootstrap := flag.String("export-bootstrap", "", "write a new secret-free bootstrap file after import and exit")
 	pruneAlerts := flag.Bool("prune-alerts", false, "collapse stored alert history to the configured cooldown and exit")
-	applyPrune := flag.Bool("apply", false, "with -prune-alerts, actually write the change instead of only reporting it")
+	pruneFailed := flag.Bool("prune-failed-requests", false, "delete failed (ok=0) request rows from the analytics database and exit")
+	applyPrune := flag.Bool("apply", false, "with -prune-alerts or -prune-failed-requests, actually write the change instead of only reporting it")
 	flag.Parse()
+	if *pruneAlerts && *pruneFailed {
+		log.Fatal("choose only one of -prune-alerts or -prune-failed-requests")
+	}
 
 	cfg, err := loadBootstrap(*configPath)
 	if err != nil {
@@ -62,7 +66,7 @@ func Run() {
 		log.Printf("backup restored; start verloc with -config %s", *configPath)
 		return
 	}
-	srv, err := openGateway(cfg, *configPath)
+	srv, err := openGateway(cfg)
 	if err != nil {
 		log.Fatalf("startup: %v", err)
 	}
@@ -110,6 +114,23 @@ func Run() {
 		for id, n := range stats.Rules {
 			log.Printf("  %-24s %d duplicate rows", id, n)
 		}
+		if !*applyPrune {
+			log.Printf("dry run: nothing written. Re-run with -apply to commit (back up first).")
+		}
+		_ = srv.Close()
+		return
+	}
+	if *pruneFailed {
+		if srv.store == nil {
+			_ = srv.Close()
+			log.Fatal("no analytics database is open; nothing to prune")
+		}
+		stats, err := srv.store.PruneFailedRequests(!*applyPrune)
+		if err != nil {
+			_ = srv.Close()
+			log.Fatalf("prune failed requests: %v", err)
+		}
+		log.Printf("requests: %d rows total, %d failed (ts %d..%d)", stats.Total, stats.Failed, stats.OldestTs, stats.NewestTs)
 		if !*applyPrune {
 			log.Printf("dry run: nothing written. Re-run with -apply to commit (back up first).")
 		}
@@ -188,7 +209,7 @@ func loadBootstrap(path string) (*Config, error) {
 	return cfg, nil
 }
 
-func openGateway(seed *Config, configPath string) (*Server, error) {
+func openGateway(seed *Config) (*Server, error) {
 	control, err := OpenControlStore(seed.ManagementDB, seed.MasterKeyFile)
 	if err != nil {
 		return nil, fmt.Errorf("management database: %w", err)

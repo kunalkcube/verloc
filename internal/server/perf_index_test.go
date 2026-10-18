@@ -62,6 +62,9 @@ func TestFilteredAnalyticsPlanUsesIndex(t *testing.T) {
 				out = append(out, detail)
 			}
 		}
+		if err := rows.Err(); err != nil {
+			t.Fatalf("explain %q: %v", sql, err)
+		}
 		return out
 	}
 
@@ -115,6 +118,9 @@ func TestUnfilteredAnalyticsUsesCoveringIndex(t *testing.T) {
 		if err := rows.Scan(&a, &b, &c, &detail); err == nil {
 			plans = append(plans, detail)
 		}
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatal(err)
 	}
 	joined := strings.Join(plans, " | ")
 	t.Logf("plan: %s", joined)
