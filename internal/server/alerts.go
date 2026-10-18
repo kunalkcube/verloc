@@ -97,6 +97,7 @@ type Aggregator struct {
 	gFull     bool
 	byScope   map[string]*scopeAgg
 	maxMinute int // minutes retained
+	lastPrune int64
 }
 
 func NewAggregator(capTicks, maxMinute int) *Aggregator {
@@ -156,6 +157,28 @@ func (a *Aggregator) Feed(t tickAgg, models, backends map[string]tickAgg) {
 	}
 	for name, agg := range backends {
 		a.minute(a.scope("backend:"+name), mk, agg)
+	}
+	// Reclaim scopes that stopped being fed: minute() only trims a scope
+	// while it is still fed, so a deleted model's entry used to persist
+	// for the process lifetime. Once a minute, drop scopes whose newest
+	// bucket is outside the retained window and trim the rest.
+	if mk != a.lastPrune {
+		a.lastPrune = mk
+		cutoff := mk - int64(a.maxMinute)
+		for name, s := range a.byScope {
+			latest := int64(0)
+			for k := range s.minutes {
+				if k > latest {
+					latest = k
+				}
+				if k < cutoff {
+					delete(s.minutes, k)
+				}
+			}
+			if latest < cutoff {
+				delete(a.byScope, name)
+			}
+		}
 	}
 }
 

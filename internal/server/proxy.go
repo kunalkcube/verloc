@@ -12,6 +12,7 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"os"
 	"regexp"
 	"strconv"
 	"strings"
@@ -845,32 +846,59 @@ func (s *Server) forward(w http.ResponseWriter, r *http.Request, endpoint string
 				idleTimeout := time.Duration(limits.StreamIdleTimeoutSeconds) * time.Second
 				idle := newIdleReader(resp.Body, idleTimeout, cancel)
 				absTimer := time.AfterFunc(maxPost200Duration, cancel)
-				var body []byte
-				body, err = io.ReadAll(io.LimitReader(idle, (64<<20)+1))
+				// The body is held whole only up to nonStreamMemLimit;
+				// past that it spills to a temp file so a huge non-stream
+				// response cannot pin tens of MB of RAM per in-flight
+				// request. The 64 MiB hard ceiling is unchanged.
+				sb, rerr := readSpillBody(io.LimitReader(idle, maxNonStreamBody+1))
 				absTimer.Stop()
 				_ = idle.Close()
-				if err == nil && (len(body) > 64<<20 || !json.Valid(body)) {
+				err = rerr
+				if err == nil && (sb.size > maxNonStreamBody || !sb.validJSON()) {
 					err = errors.New("incomplete upstream response")
 				}
 				cancel()
+				var body []byte
+				spilled := sb.file != nil && endpoint != "/systemone" && b.stripReasoning
+				if err == nil && !spilled {
+					// In-memory bodies (the overwhelming majority), plus
+					// the rare paths that must rewrite bytes (SystemOne
+					// envelope, reasoning replay), materialize fully —
+					// still bounded by the 64 MiB ceiling.
+					body, err = sb.bytes()
+				}
 				if err == nil && endpoint == "/systemone" {
 					body, err = systemOneResponse(body, cloudflareEnvelope)
 				}
 				if err != nil {
+					sb.close()
 					b.pool.RecordErr(ks)
 					finishAttempt(502, "interrupted")
 					lastStatus = 502
 					continue
 				}
-				rec.TokIn, rec.TokOut, rec.TokCache, rec.UsageKnown = usageOf(body)
-				if endpoint != "/systemone" && !b.stripReasoning {
-					body = rememberFromResponse(body, s.reasonCache)
+				if spilled {
+					rec.TokIn, rec.TokOut, rec.TokCache, rec.UsageKnown = usageFromReader(sb.reader())
+				} else {
+					rec.TokIn, rec.TokOut, rec.TokCache, rec.UsageKnown = usageOf(body)
+					if endpoint != "/systemone" && !b.stripReasoning {
+						body = rememberFromResponse(body, s.reasonCache)
+					}
 				}
 				copyResponseHeaders(w, resp, false)
 				w.Header().Del("Content-Length") // Reasoning aliases can change the body length.
 				w.Header().Set("X-Request-ID", id)
 				w.WriteHeader(http.StatusOK)
-				if _, err = w.Write(body); err != nil {
+				if spilled {
+					_, err = w.Write(sb.mem)
+					if err == nil {
+						_, err = io.Copy(w, io.NewSectionReader(sb.file, 0, sb.fileSize))
+					}
+				} else {
+					_, err = w.Write(body)
+				}
+				sb.close()
+				if err != nil {
 					rec.Status, rec.Outcome, rec.ErrMsg = 499, "canceled", "client write failed"
 					b.pool.RecordErr(ks)
 					finishAttempt(499, "canceled")
@@ -1419,6 +1447,51 @@ func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {
 
 // usageOf supports Chat Completions, Responses, and native System One usage.
 // Explicit zero usage is known; omitted token fields remain unknown.
+// usageFromReader is usageOf over a stream, for spilled bodies that must
+// not be materialized just to find the usage object.
+func usageFromReader(r io.Reader) (in, out, cache uint64, ok bool) {
+	var p struct {
+		Usage    *usageJSON `json:"usage"`
+		Response struct {
+			Usage *usageJSON `json:"usage"`
+		} `json:"response"`
+	}
+	if err := json.NewDecoder(r).Decode(&p); err != nil {
+		return 0, 0, 0, false
+	}
+	u := p.Usage
+	if u == nil {
+		u = p.Response.Usage
+	}
+	return extractUsage(u)
+}
+
+type usageJSON = struct {
+	Prompt        *uint64 `json:"prompt_tokens"`
+	Completion    *uint64 `json:"completion_tokens"`
+	Input         *uint64 `json:"input_tokens"`
+	Output        *uint64 `json:"output_tokens"`
+	PromptDetails struct {
+		Cached uint64 `json:"cached_tokens"`
+	} `json:"prompt_tokens_details"`
+	InputDetails struct {
+		Cached uint64 `json:"cached_tokens"`
+	} `json:"input_tokens_details"`
+}
+
+func extractUsage(u *usageJSON) (in, out, cache uint64, ok bool) {
+	if u == nil {
+		return 0, 0, 0, false
+	}
+	if u.Prompt != nil && u.Completion != nil {
+		return *u.Prompt, *u.Completion, u.PromptDetails.Cached, true
+	}
+	if u.Input != nil && u.Output != nil {
+		return *u.Input, *u.Output, u.InputDetails.Cached, true
+	}
+	return 0, 0, 0, false
+}
+
 func usageOf(body []byte) (in, out, cache uint64, ok bool) {
 	type usage struct {
 		Prompt        *uint64 `json:"prompt_tokens"`
@@ -1488,6 +1561,113 @@ func (w *committedStreamWriter) FlushError() error {
 		return nil
 	}
 	return err
+}
+
+// Non-stream responses are buffered before anything is written to the
+// client (usage must be extracted and failover must still be possible).
+// Holding up to 64 MiB per in-flight request in RAM does not scale, so
+// past nonStreamMemLimit the tail spills to a temp file. The hard ceiling
+// is unchanged: oversized or invalid bodies are still rejected.
+const maxNonStreamBody = int64(64 << 20)
+
+var nonStreamMemLimit = int64(8 << 20) // var so tests can shrink it
+
+type spillBody struct {
+	mem      []byte // prefix, up to nonStreamMemLimit
+	file     *os.File
+	fileSize int64
+	size     int64
+}
+
+func readSpillBody(r io.Reader) (*spillBody, error) {
+	b := &spillBody{}
+	chunk := make([]byte, 32<<10)
+	for {
+		n, err := r.Read(chunk)
+		if n > 0 {
+			data := chunk[:n]
+			b.size += int64(n)
+			if b.file == nil {
+				room := nonStreamMemLimit - int64(len(b.mem))
+				if int64(len(data)) <= room {
+					b.mem = append(b.mem, data...)
+				} else {
+					// This chunk crosses the memory limit: mem keeps the
+					// prefix, the remainder starts the spill file.
+					b.mem = append(b.mem, data[:int(room)]...)
+					f, ferr := os.CreateTemp("", "verloc-body-*")
+					if ferr != nil {
+						return b, ferr
+					}
+					if _, ferr = f.Write(data[int(room):]); ferr != nil {
+						_ = f.Close()
+						_ = os.Remove(f.Name())
+						return b, ferr
+					}
+					b.file = f
+					b.fileSize = int64(len(data)) - room
+				}
+			} else {
+				if _, werr := b.file.Write(data); werr != nil {
+					return b, werr
+				}
+				b.fileSize += int64(n)
+			}
+		}
+		if err == io.EOF {
+			return b, nil
+		}
+		if err != nil {
+			return b, err
+		}
+	}
+}
+
+// reader streams the whole body without materializing it.
+func (b *spillBody) reader() io.Reader {
+	if b.file == nil {
+		return bytes.NewReader(b.mem)
+	}
+	return io.MultiReader(bytes.NewReader(b.mem), io.NewSectionReader(b.file, 0, b.fileSize))
+}
+
+// bytes materializes the whole body. Callers that rewrite bytes use it;
+// the common spilled path streams instead.
+func (b *spillBody) bytes() ([]byte, error) {
+	if b.file == nil {
+		return b.mem, nil
+	}
+	out := make([]byte, 0, b.size)
+	out = append(out, b.mem...)
+	if _, err := b.file.Seek(0, io.SeekStart); err != nil {
+		return nil, err
+	}
+	tail, err := io.ReadAll(b.file)
+	if err != nil {
+		return nil, err
+	}
+	return append(out, tail...), nil
+}
+
+func (b *spillBody) validJSON() bool {
+	if b.file == nil {
+		return json.Valid(b.mem)
+	}
+	dec := json.NewDecoder(b.reader())
+	var v any
+	if err := dec.Decode(&v); err != nil {
+		return false
+	}
+	return dec.Decode(&v) == io.EOF
+}
+
+func (b *spillBody) close() {
+	if b.file != nil {
+		name := b.file.Name()
+		_ = b.file.Close()
+		_ = os.Remove(name)
+		b.file = nil
+	}
 }
 
 type idleReader struct {

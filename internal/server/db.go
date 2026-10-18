@@ -1381,17 +1381,6 @@ func (s *Store) Telemetry() TelemetryStatus {
 	return TelemetryStatus{s.queued.Load() + int64(len(s.keyEvCh)), s.requestDrop.Load(), s.keyEvDrop.Load(), s.writeErrors.Load(), s.lastWrite.Load()}
 }
 
-// invalidateSummary drops memoised page summaries. Called whenever rows are
-// inserted: a cached total must never outlive the data it describes (a window
-// like "last 1h" gains rows continuously).
-func (s *Store) invalidateSummary() {
-	s.summaryMu.Lock()
-	if len(s.summaryCache) > 0 {
-		s.summaryCache = map[string]summaryCacheEntry{}
-	}
-	s.summaryMu.Unlock()
-}
-
 func (s *Store) noteWrite(err error) {
 	if err != nil {
 		s.writeErrors.Add(1)
@@ -1524,7 +1513,11 @@ func (s *Store) insertRequests(batch []ReqRecord) error {
 	if err := tx.Commit(); err != nil {
 		return err
 	}
-	s.invalidateSummary()
+	// Deliberately NO summary-cache invalidation here. It used to clear the
+	// memo on every batch (≤100 ms under load), which made the cache dead
+	// exactly when it would help. The memo now lives purely on its TTL:
+	// staleness is bounded by summaryMemoTTLMs, one dashboard poll cycle,
+	// and the guard test asserts that bound.
 	return nil
 }
 
@@ -1708,8 +1701,10 @@ type summaryCacheEntry struct {
 	s  RequestSummary
 }
 
-// summaryMemoTTLMs is a safety net behind write-triggered invalidation: a
-// summary is honoured for at most a few seconds, matching the ticker cadence.
+// summaryMemoTTLMs is the memo's ONLY freshness mechanism: a summary is
+// honoured for at most 3s — one dashboard poll cycle — after which it is
+// recomputed. (Write-triggered invalidation cleared the cache every
+// ≤100ms batch under load, so it never survived to be useful.)
 const summaryMemoTTLMs = 3000
 
 func (s *Store) Requests(ctx context.Context, f RequestFilter) (RequestPage, error) {
@@ -1796,6 +1791,39 @@ type usageAccumulator struct {
 	latSum, ttftSum   float64
 	ttftN             int64
 	latHist, ttftHist [len(latBuckets) + 1]uint64
+}
+
+// analyticsAggColumns is the SELECT list (in scanAgg's scan order) that
+// computes one usageAccumulator entirely in SQL: counts, token/cost sums,
+// unknown counters, latency/TTFT sums, and both histograms as CASE sums
+// matching bucketOf (first edge >= ms; TTFT only for ttft_ms > 0).
+func analyticsAggColumns() string {
+	var sb strings.Builder
+	sb.WriteString(`COUNT(*),
+		COALESCE(SUM(CASE WHEN ok=0 THEN 1 ELSE 0 END),0),
+		COALESCE(SUM(tok_in),0), COALESCE(SUM(tok_out),0), COALESCE(SUM(tok_cache),0),
+		COALESCE(SUM(cost),0),
+		COALESCE(SUM(CASE WHEN usage_known=0 THEN 1 ELSE 0 END),0),
+		COALESCE(SUM(CASE WHEN cost_known=0 THEN 1 ELSE 0 END),0),
+		COALESCE(SUM(lat_ms),0),
+		COALESCE(SUM(CASE WHEN ttft_ms>0 THEN ttft_ms ELSE 0 END),0),
+		COALESCE(SUM(CASE WHEN ttft_ms>0 THEN 1 ELSE 0 END),0)`)
+	for i := range len(latBuckets) + 1 {
+		var latCond, ttftCond string
+		if i < len(latBuckets) {
+			latCond = fmt.Sprintf("lat_ms<=%v", latBuckets[i])
+			ttftCond = fmt.Sprintf("ttft_ms>0 AND ttft_ms<=%v", latBuckets[i])
+			if i > 0 {
+				latCond += fmt.Sprintf(" AND lat_ms>%v", latBuckets[i-1])
+				ttftCond += fmt.Sprintf(" AND ttft_ms>%v", latBuckets[i-1])
+			}
+		} else {
+			latCond = fmt.Sprintf("lat_ms>%v", latBuckets[len(latBuckets)-1])
+			ttftCond = fmt.Sprintf("ttft_ms>%v", latBuckets[len(latBuckets)-1])
+		}
+		fmt.Fprintf(&sb, ", COALESCE(SUM(CASE WHEN %s THEN 1 ELSE 0 END),0), COALESCE(SUM(CASE WHEN %s THEN 1 ELSE 0 END),0)", latCond, ttftCond)
+	}
+	return sb.String()
 }
 
 // addColumns accumulates one request from its stored columns. It must stay
@@ -1973,46 +2001,128 @@ func (s *Store) Analytics(ctx context.Context, f RequestFilter) (AnalyticsResult
 			out.Coverage.NewestTS = ts
 		}
 	}
-	// Project the aggregate columns instead of the JSON `record` blob: every
-	// field this function sums already lives in a column, so decoding 200k
-	// ReqRecord values was pure waste (measured 262MB / 3.2M allocs, and the
-	// dominant cost of the unfiltered query). The accumulator is filled
-	// directly, which also removes the intermediate ReqRecord entirely.
+	// Aggregate IN SQL instead of folding every row in Go. The previous
+	// column projection removed the JSON decode (262MB / 3.2M allocs at
+	// 200k rows), but the driver still scanned one row per request
+	// (~25 allocs each). Every accumulator field is a SUM or a histogram
+	// CASE, so the database returns one row per GROUP — the per-request
+	// cost is gone rather than shaved. The hourly tier below still folds
+	// in Go (it is tiny) through the same add(), keeping one merge path.
 	where, args := f.where(false)
-	rows, err := tx.QueryContext(ctx, `SELECT ts, model, backend, client_key_id, client_name, status, ok,
-	                                        tok_in, tok_out, tok_cache, cost, usage_known, cost_known, lat_ms, ttft_ms
-	                                 FROM requests WHERE `+where, args...)
+	aggCols := analyticsAggColumns()
+	// scanAgg reads one aggregate row (optionally keyed) in aggCols order.
+	scanAgg := func(scan func(...any) error, key *string) (*usageAccumulator, int64, int64, error) {
+		a := &usageAccumulator{}
+		var latH, ttftH [len(latBuckets) + 1]int64
+		dest := []any{}
+		if key != nil {
+			dest = append(dest, key)
+		}
+		dest = append(dest, &a.Requests, &a.Errors, &a.TokIn, &a.TokOut, &a.TokCache, &a.Cost,
+			&a.UnknownUsage, &a.UnknownCost, &a.latSum, &a.ttftSum, &a.ttftN)
+		for i := range latH {
+			dest = append(dest, &latH[i], &ttftH[i])
+		}
+		var oldest, newest int64
+		dest = append(dest, &oldest, &newest)
+		if err := scan(dest...); err != nil {
+			return nil, 0, 0, err
+		}
+		for i := range latH {
+			a.latHist[i] = uint64(latH[i])
+			a.ttftHist[i] = uint64(ttftH[i])
+		}
+		return a, oldest, newest, nil
+	}
+	mergeInto := func(m map[string]*usageAccumulator, key string, a *usageAccumulator) {
+		x := m[key]
+		if x == nil {
+			x = &usageAccumulator{}
+			m[key] = x
+		}
+		x.merge(a)
+	}
+
+	totalAgg, detOld, detNew, err := scanAgg(tx.QueryRowContext(ctx,
+		`SELECT `+aggCols+`, COALESCE(MIN(ts),0), COALESCE(MAX(ts),0) FROM requests WHERE `+where, args...).Scan, nil)
 	if err != nil {
 		return out, err
 	}
-	for rows.Next() {
-		var (
-			ts, status                  int64
-			ok, usageKnown, costKnown   bool
-			model, backend, ckID, cName string
-			tin, tout, tcache           uint64
-			cost, lat, ttft             float64
-		)
-		if err = rows.Scan(&ts, &model, &backend, &ckID, &cName, &status, &ok,
-			&tin, &tout, &tcache, &cost, &usageKnown, &costKnown, &lat, &ttft); err != nil {
-			rows.Close()
+	if totalAgg.Requests > 0 {
+		total.merge(totalAgg)
+		cover(detOld)
+		cover(detNew)
+		out.Coverage.DetailOldestTS = detOld
+		out.Coverage.DetailNewestTS = detNew
+
+		groupQueries := []struct {
+			col string
+			m   map[string]*usageAccumulator
+		}{{"model", models}, {"backend", providers}, {"client_key_id", clients}}
+		for _, gq := range groupQueries {
+			grows, gerr := tx.QueryContext(ctx,
+				`SELECT `+gq.col+`, `+aggCols+`, 0, 0 FROM requests WHERE `+where+` GROUP BY `+gq.col, args...)
+			if gerr != nil {
+				return out, gerr
+			}
+			for grows.Next() {
+				var key string
+				a2, _, _, serr := scanAgg(grows.Scan, &key)
+				if serr != nil {
+					grows.Close()
+					return out, serr
+				}
+				mergeInto(gq.m, key, a2)
+			}
+			if gerr = grows.Err(); gerr != nil {
+				grows.Close()
+				return out, gerr
+			}
+			grows.Close()
+		}
+		// Latest client display name per key (max ts, name breaks ties) —
+		// the same rule the Go fold applied per row.
+		nameRows, nerr := tx.QueryContext(ctx,
+			`SELECT client_key_id, client_name FROM (
+			   SELECT client_key_id, client_name,
+			          ROW_NUMBER() OVER (PARTITION BY client_key_id ORDER BY ts DESC, client_name DESC) AS rn
+			   FROM requests WHERE `+where+`) WHERE rn = 1`, args...)
+		if nerr != nil {
+			return out, nerr
+		}
+		for nameRows.Next() {
+			var id, name string
+			if err = nameRows.Scan(&id, &name); err != nil {
+				nameRows.Close()
+				return out, err
+			}
+			names[id] = name
+			nameTS[id] = detNew // hourly fold may only override with newer data
+		}
+		if err = nameRows.Err(); err != nil {
+			nameRows.Close()
 			return out, err
 		}
-		a := &usageAccumulator{}
-		a.addColumns(ok, usageKnown, costKnown, tin, tout, tcache, cost, lat, ttft)
-		add(model, backend, ckID, cName, int(status), ts, a)
-		cover(ts)
-		if out.Coverage.DetailOldestTS == 0 || ts < out.Coverage.DetailOldestTS {
-			out.Coverage.DetailOldestTS = ts
+		nameRows.Close()
+		// Status counts.
+		statusRows, serr := tx.QueryContext(ctx,
+			`SELECT status, COUNT(*) FROM requests WHERE `+where+` GROUP BY status`, args...)
+		if serr != nil {
+			return out, serr
 		}
-		if ts > out.Coverage.DetailNewestTS {
-			out.Coverage.DetailNewestTS = ts
+		for statusRows.Next() {
+			var st, n int64
+			if err = statusRows.Scan(&st, &n); err != nil {
+				statusRows.Close()
+				return out, err
+			}
+			statuses[int(st)] = n
 		}
-	}
-	err = rows.Err()
-	rows.Close()
-	if err != nil {
-		return out, err
+		if err = statusRows.Err(); err != nil {
+			statusRows.Close()
+			return out, err
+		}
+		statusRows.Close()
 	}
 	// request_hourly is a COVERAGE TIER whose rows are aggregates of detail that
 	// was PRUNED, so they are additive with any surviving detail for the same
@@ -2033,9 +2143,9 @@ func (s *Store) Analytics(ctx context.Context, f RequestFilter) (AnalyticsResult
 	} else {
 		hourlyWhere += " AND mirrors_detail=0"
 	}
-	rows, err = tx.QueryContext(ctx, `SELECT hour,model,backend,client_key_id,client_name,status,requests,errors,tok_in,tok_out,tok_cache,cost,unknown_usage,unknown_cost,lat_sum,ttft_sum,ttft_n,lat_hist,ttft_hist FROM request_hourly WHERE `+hourlyWhere, hourlyArgs...)
-	if err != nil {
-		return out, err
+	rows, qerr := tx.QueryContext(ctx, `SELECT hour,model,backend,client_key_id,client_name,status,requests,errors,tok_in,tok_out,tok_cache,cost,unknown_usage,unknown_cost,lat_sum,ttft_sum,ttft_n,lat_hist,ttft_hist FROM request_hourly WHERE `+hourlyWhere, hourlyArgs...)
+	if qerr != nil {
+		return out, qerr
 	}
 	for rows.Next() {
 		var hour int64

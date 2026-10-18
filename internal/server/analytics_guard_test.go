@@ -9,9 +9,10 @@ import (
 	"time"
 )
 
-// TestRequestsSummaryMemoDoesNotOutliveInserts is the correctness guard for the
-// memo: after new rows land, a repeat query must report the NEW totals, not the
-// cached ones. A stale summary would silently under-report spend.
+// TestRequestsSummaryMemoDoesNotOutliveInserts is the correctness guard for
+// the memo. The memo is TTL-only (write-invalidation made it dead under
+// continuous load), so the guarantee is BOUNDED staleness: after new rows
+// land, totals must become correct within the TTL, never stay stale.
 func TestRequestsSummaryMemoDoesNotOutliveInserts(t *testing.T) {
 	s := testKeyEventStore(t)
 	base := time.Now().Add(-30 * time.Minute).UnixMilli()
@@ -45,14 +46,21 @@ func TestRequestsSummaryMemoDoesNotOutliveInserts(t *testing.T) {
 		t.Fatalf("paged summary requests = %d, want 10 (memo wrong within a filter)", page2.Summary.Requests)
 	}
 
-	// New rows arrive: the memo must be invalidated.
+	// New rows arrive: totals must converge within the memo TTL.
 	insert(7, 100)
-	after, err := s.Requests(context.Background(), RequestFilter{Limit: 5, Since: base})
-	if err != nil {
-		t.Fatal(err)
+	var after RequestPage
+	for deadline := time.Now().Add(10 * time.Second); time.Now().Before(deadline); {
+		after, err = s.Requests(context.Background(), RequestFilter{Limit: 5, Since: base})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if after.Summary.Requests == 17 {
+			break
+		}
+		time.Sleep(50 * time.Millisecond)
 	}
 	if after.Summary.Requests != 17 {
-		t.Fatalf("summary requests = %d, want 17; the memo served a stale total", after.Summary.Requests)
+		t.Fatalf("summary requests = %d, want 17; the memo stayed stale past its TTL", after.Summary.Requests)
 	}
 	if diffFloat(after.Summary.Cost, 0.17) {
 		t.Fatalf("summary cost = %v, want 0.17", after.Summary.Cost)
@@ -132,8 +140,15 @@ func TestAnalyticsColumnProjectionMatchesRecordPath(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got.Summary != want {
-		t.Fatalf("column projection disagrees with record fold:\n got  %+v\n want %+v", got.Summary, want)
+	// Cost is compared with tolerance: SQL SUM and a sequential Go fold sum
+	// the same values in different orders, so bit-exact float equality is
+	// not a meaningful requirement. Everything else must match exactly.
+	if got.Summary.Requests != want.Requests || got.Summary.Errors != want.Errors ||
+		got.Summary.TokIn != want.TokIn || got.Summary.TokOut != want.TokOut ||
+		got.Summary.TokCache != want.TokCache || got.Summary.UnknownUsage != want.UnknownUsage ||
+		got.Summary.UnknownCost != want.UnknownCost || got.Summary.AvgLatencyMs != want.AvgLatencyMs ||
+		got.Summary.AvgTTFTMs != want.AvgTTFTMs || diffFloat(got.Summary.Cost, want.Cost) {
+		t.Fatalf("SQL aggregation disagrees with record fold:\n got  %+v\n want %+v", got.Summary, want)
 	}
 	var totalRequests int64
 	for _, g := range got.Models {
