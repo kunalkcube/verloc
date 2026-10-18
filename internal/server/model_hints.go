@@ -430,7 +430,11 @@ func getJSON(ctx context.Context, url string, limit int64, timeout time.Duration
 		return nil, err
 	}
 	req.Header.Set("Accept", "application/json")
-	resp, err := newClient(int(timeout.Seconds()) + 5).Do(req)
+	// A fresh client per fetch: close its idle connections on the way out
+	// or every catalog refresh abandons sockets to the 90s IdleConnTimeout.
+	client := newClient(int(timeout.Seconds()) + 5)
+	defer client.CloseIdleConnections()
+	resp, err := client.Do(req)
 	if err != nil {
 		return nil, err
 	}
