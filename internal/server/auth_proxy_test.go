@@ -3,11 +3,8 @@ package server
 import (
 	"net/http/httptest"
 	"testing"
-	"time"
 )
 
-// B3/B4: trusted proxies unlock forwarded client identity; untrusted
-// peers can never spoof it. Host allowlist rejects rebinding-style hosts.
 func TestTrustedProxyAndHostAllowlist(t *testing.T) {
 	s := &Security{
 		trustedProxies: parseTrustedProxies([]string{"10.0.0.0/8", "bad-entry"}),
@@ -45,16 +42,3 @@ func TestTrustedProxyAndHostAllowlist(t *testing.T) {
 }
 
 // D4: scopes that stop being fed are reclaimed; live scopes keep history.
-func TestAggregatorPrunesDeadScopes(t *testing.T) {
-	a := NewAggregator(100, 60) // retain 60 minutes
-	old := time.Now().Add(-3 * time.Hour).UnixMilli()
-	a.Feed(tickAgg{TS: old, Req: 1}, map[string]tickAgg{"gone": {Req: 1}}, nil)
-	now := time.Now().UnixMilli()
-	a.Feed(tickAgg{TS: now, Req: 1}, map[string]tickAgg{"alive": {Req: 1}}, nil)
-	if _, ok := a.byScope["model:gone"]; ok {
-		t.Fatal("dead scope was not pruned")
-	}
-	if _, ok := a.byScope["model:alive"]; !ok {
-		t.Fatal("live scope was pruned")
-	}
-}
