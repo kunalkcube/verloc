@@ -11,14 +11,15 @@ const SECTIONS: Array<[string, string, string]> = [
   ['04', 'Chat Completions', 'chat-completions'],
   ['05', 'Responses', 'responses'],
   ['06', 'System One', 'system-one'],
-  ['07', 'Utility endpoints', 'utility-endpoints'],
-  ['08', 'Errors', 'errors'],
-  ['09', 'Failover', 'failover'],
-  ['10', 'Model routing', 'model-routing'],
-  ['11', 'Client keys', 'client-keys'],
-  ['12', 'Configuration', 'configuration'],
-  ['13', 'Platform features', 'features'],
-  ['14', 'Compatibility', 'compatibility'],
+  ['07', 'Anthropic Messages', 'anthropic-messages'],
+  ['08', 'Utility endpoints', 'utility-endpoints'],
+  ['09', 'Errors', 'errors'],
+  ['10', 'Failover', 'failover'],
+  ['11', 'Model routing', 'model-routing'],
+  ['12', 'Client keys', 'client-keys'],
+  ['13', 'Configuration', 'configuration'],
+  ['14', 'Platform features', 'features'],
+  ['15', 'Compatibility', 'compatibility'],
 ];
 
 function CopyButton({ text }: { text: string }) {
@@ -175,14 +176,60 @@ const SYSTEMONE_REQUEST = `{
   "questions": ["Which team should handle this incident?"]
 }`;
 
-const SYSTEMONE_RESPONSE = `{
-  "model": "clef",
+const SYSTEMONE_RESPONSE = `{  "model": "clef",
   "answers": ["{\\"team\\":\\"technical\\",\\"confidence\\":0.94}"],
   "probabilities": [0.94],
   "confidence": 0.94,
   "legend": { "team": ["technical", "billing", "abuse"] },
   "usage": { "input_tokens": 338, "output_tokens": 0 }
 }`;
+
+const ANTHROPIC_REQUEST = `{
+  "model": "nv/deepseek-ai/deepseek-v4.1-flash",
+  "max_tokens": 1024,
+  "system": "You are a coding agent.",
+  "messages": [
+    { "role": "user", "content": "Explain this error" }
+  ]
+}`;
+
+const ANTHROPIC_RESPONSE = `{
+  "id": "msg_chatcmpl-...",
+  "type": "message",
+  "role": "assistant",
+  "model": "nv/deepseek-ai/deepseek-v4.1-flash",
+  "content": [
+    { "type": "text", "text": "The error means..." }
+  ],
+  "stop_reason": "end_turn",
+  "stop_sequence": null,
+  "usage": { "input_tokens": 25, "output_tokens": 148, "cache_creation_input_tokens": 0, "cache_read_input_tokens": 0 }
+}`;
+
+const ANTHROPIC_STREAM_EVENTS = `event: message_start
+data: {"type":"message_start","message":{"id":"msg_...","type":"message","role":"assistant","content":[],"usage":{"input_tokens":25,"output_tokens":1}}}
+
+event: content_block_start
+data: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}
+
+event: content_block_delta
+data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"The error means..."}}
+
+event: content_block_stop
+data: {"type":"content_block_stop","index":0}
+
+event: message_delta
+data: {"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null},"usage":{"output_tokens":148}}
+
+event: message_stop
+data: {"type":"message_stop"}`;
+
+const ANTHROPIC_CLAUDE_CODE = `export ANTHROPIC_BASE_URL="$BASE_URL"
+export ANTHROPIC_API_KEY="vlk_..."
+export ANTHROPIC_MODEL="nv/deepseek-ai/deepseek-v4.1-flash"    # main model
+export ANTHROPIC_SMALL_FAST_MODEL="nv/..."                     # background tasks
+# Optional: populate the /model picker from this gateway
+export CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY=1`;
 
 const ERROR_BODY = `{
   "error": {
@@ -308,6 +355,8 @@ export default function Docs() {
           <TableBody>
             {([
               ['POST', '/v1/chat/completions', 'Client key', 'OpenAI-compatible chat; supports SSE streaming'],
+              ['POST', '/v1/messages', 'Client key', 'Anthropic Messages protocol (Claude Code / Anthropic SDKs); SSE streaming'],
+              ['POST', '/v1/messages/count_tokens', 'Client key', 'Anthropic token counting; character-based estimate'],
               ['POST', '/v1/responses', 'Client key', 'OpenAI Responses passthrough; upstream must implement /responses'],
               ['POST', '/v1/systemone', 'Client key', 'Native Jev/Clef decision API; non-streaming, uncompressed JSON'],
               ['GET', '/v1/models', 'Public', 'Enabled models; a client key narrows the list to its scope'],
@@ -399,7 +448,51 @@ export default function Docs() {
         <CodeBlock label="Response" code={SYSTEMONE_RESPONSE} />
       </Section>
 
-      <Section id="utility-endpoints" index="07" kicker="Reference" title="Utility endpoints"
+      <Section id="anthropic-messages" index="07" kicker="Inference" title="Anthropic Messages API"
+        description="The Anthropic Messages wire protocol, so Anthropic-native clients — Claude Code, Cline, the Anthropic SDKs — can point at verloc by changing only the base URL and key.">
+        <Endpoint method="POST" path="/v1/messages" alias="/messages" />
+        <Prose>
+          Requests are translated to the OpenAI chat shape, routed through the same gateway path
+          (key rotation, failover, limits, analytics), and responses are translated back — including
+          streaming, tool use, and thinking blocks. Authenticate with
+          <code className="mx-1 font-mono text-edge-200">x-api-key: {"<vlk_ key>"}</code> (Anthropic
+          clients) or the usual Bearer header; both are the same client keys.
+        </Prose>
+        <Spec rows={[
+          ['model', 'string (required)', 'Public verloc model ID, exactly as in /v1/models. Claude-style IDs work only if you add them as models with routes.'],
+          ['max_tokens', 'integer (required)', 'Maximum output tokens for this response.'],
+          ['system', 'string | blocks', 'System prompt, string or an array of text blocks.'],
+          ['messages', 'array (required)', 'user / assistant turns with string or block-array content: text, tool_use, tool_result, image (base64).'],
+          ['tools', 'array', 'Tool definitions with name, description, input_schema. tool_result content is folded to text.'],
+          ['stop_sequences', 'array', 'Maps to OpenAI stop.'],
+          ['temperature / top_p', 'number', 'Passed through. top_k is dropped (no chat equivalent).'],
+        ]} />
+        <CodeBlock label="Request" code={ANTHROPIC_REQUEST} />
+        <CodeBlock label="Response" code={ANTHROPIC_RESPONSE} />
+        <Prose>
+          Streaming produces the full Anthropic event sequence: message_start, content_block_start,
+          content_block_delta (text_delta / thinking_delta / input_json_delta), content_block_stop,
+          message_delta (stop_reason + usage), message_stop. Pings are emitted during long thinking
+          pauses so client idle watchdogs are not tripped.
+        </Prose>
+        <CodeBlock label="Stream events" code={ANTHROPIC_STREAM_EVENTS} />
+        <Spec rows={[
+          ['end_turn', 'finish_reason "stop"', 'Default terminal reason.'],
+          ['max_tokens', 'finish_reason "length"', 'Output limit reached.'],
+          ['tool_use', 'finish_reason "tool_calls" / "function_call"', 'The model requested tools.'],
+          ['refusal', 'finish_reason "content_filter"', 'Upstream refused the content.'],
+        ]} />
+        <Prose>
+          Upstream reasoning (reasoning_content) is surfaced as Anthropic thinking blocks. Inbound
+          thinking blocks with signatures and cache_control markers are consumed, not forwarded —
+          backends cannot verify Anthropic signatures. count_tokens is served as a character-based
+          estimate. Claude Code background calls use haiku by default; set ANTHROPIC_MODEL and
+          ANTHROPIC_SMALL_FAST_MODEL, or add claude-named model aliases.
+        </Prose>
+        <CodeBlock label="Claude Code setup" code={ANTHROPIC_CLAUDE_CODE} />
+      </Section>
+
+      <Section id="utility-endpoints" index="08" kicker="Reference" title="Utility endpoints"
         description="Discovery, pricing, and operational probes. Model discovery is public; pricing is filtered by the calling key's scope.">
         <Endpoint method="GET" path="/v1/models" alias="/models" />
         <Prose>
@@ -429,7 +522,7 @@ export default function Docs() {
         </div>
       </Section>
 
-      <Section id="errors" index="08" kicker="Reliability" title="Errors and status codes"
+      <Section id="errors" index="09" kicker="Reliability" title="Errors and status codes"
         description="Two error envelopes are used. Inference errors carry type gateway_error; middleware and routing errors carry type invalid_request.">
         <CodeBlock label="Error body shape" code={ERROR_BODY} />
         <Table className="min-w-[720px]">
@@ -477,7 +570,7 @@ export default function Docs() {
         </Note>
       </Section>
 
-      <Section id="failover" index="09" kicker="Reliability" title="Failover and retries"
+      <Section id="failover" index="10" kicker="Reliability" title="Failover and retries"
         description="verloc tries the primary route first, then each configured fallback in order, rotating through credentials until a response is committed.">
         <Prose>
           Retries are bounded by both an attempt count and a wall-clock budget. Keys that fail enter
@@ -522,7 +615,7 @@ export default function Docs() {
         </Table>
       </Section>
 
-      <Section id="model-routing" index="10" kicker="Routing" title="Model routing"
+      <Section id="model-routing" index="11" kicker="Routing" title="Model routing"
         description="A public model ID is an alias. It resolves to a backend and an upstream model name, with optional ordered fallbacks.">
         <Prose>
           Each entry in the model map either names a backend explicitly (<code className="font-mono text-edge-200">backend:upstream</code>)
@@ -550,7 +643,7 @@ export default function Docs() {
         </Note>
       </Section>
 
-      <Section id="client-keys" index="11" kicker="Access control" title="Client key policy"
+      <Section id="client-keys" index="12" kicker="Access control" title="Client key policy"
         description="Application keys carry an optional model scope and independent rate ceilings. Manage them under API Keys.">
         <Spec rows={[
           ['name', 'string (1–120)', 'Human label shown in the dashboard and audit history.'],
@@ -578,7 +671,7 @@ export default function Docs() {
   }'`} />
       </Section>
 
-      <Section id="configuration" index="12" kicker="Operations" title="Configuration reference"
+      <Section id="configuration" index="13" kicker="Operations" title="Configuration reference"
         description="configuration.json bootstraps the gateway once; SQLite is the source of truth afterwards. Most settings are applied live from the dashboard.">
         <Prose>
           The management database holds providers, credentials, models, routes, limits, and alert
@@ -613,7 +706,7 @@ export default function Docs() {
         </Note>
       </Section>
 
-      <Section id="features" index="13" kicker="Platform" title="Platform features"
+      <Section id="features" index="14" kicker="Platform" title="Platform features"
         description="Beyond proxying: credential pooling, provider onboarding, a pricing catalog, durable analytics, alerts, and private backups.">
         <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
           {([
@@ -634,7 +727,7 @@ export default function Docs() {
         </div>
       </Section>
 
-      <Section id="compatibility" index="14" kicker="Scope" title="Compatibility and limitations"
+      <Section id="compatibility" index="15" kicker="Scope" title="Compatibility and limitations"
         description="verloc is a focused single-owner gateway. Knowing its boundaries avoids surprises.">
         <ul className="space-y-3">
           {([

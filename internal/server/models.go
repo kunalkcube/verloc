@@ -31,6 +31,7 @@ type modelInfo struct {
 	MaxTokens         int            `json:"max_tokens"`
 	Type              string         `json:"type"`
 	Name              string         `json:"name"`
+	DisplayName       string         `json:"display_name,omitempty"`
 	Description       string         `json:"description"`
 	Tags              []string       `json:"tags,omitempty"`
 	Pricing           pricingOR      `json:"pricing"`

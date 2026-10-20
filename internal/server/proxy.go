@@ -145,15 +145,15 @@ func (s *Server) wirePoolHooks(backends map[string]*backend) {
 }
 
 func (s *Server) handleChat(w http.ResponseWriter, r *http.Request) {
-	s.forward(w, r, "/chat/completions")
+	s.forward(w, r, "/chat/completions", nil)
 }
 
 func (s *Server) handleResponses(w http.ResponseWriter, r *http.Request) {
-	s.forward(w, r, "/responses")
+	s.forward(w, r, "/responses", nil)
 }
 
 func (s *Server) handleSystemOne(w http.ResponseWriter, r *http.Request) {
-	s.forward(w, r, "/systemone")
+	s.forward(w, r, "/systemone", nil)
 }
 
 func isCloudflareClef(baseURL, upstream string) bool {
@@ -481,7 +481,7 @@ func prepareTPMRequest(raw []byte, metadata requestMetadata, cfg *Config, endpoi
 	return bounded, reservation, err
 }
 
-func (s *Server) forward(w http.ResponseWriter, r *http.Request, endpoint string) {
+func (s *Server) forward(w http.ResponseWriter, r *http.Request, endpoint string, anthropic *anthropicContext) {
 	// Wrap first so the panic recovery below can determine whether a response
 	// was already committed to the client.
 	tw := &trackingResponseWriter{ResponseWriter: w}
@@ -548,7 +548,11 @@ func (s *Server) forward(w http.ResponseWriter, r *http.Request, endpoint string
 	fail := func(status int, outcome, message string) {
 		rec.Status, rec.Outcome, rec.ErrMsg = status, outcome, message
 		if r.Context().Err() == nil {
-			proxyError(w, status, message)
+			if anthropic != nil {
+				anthropic.errorWriter(w, status, message)
+			} else {
+				proxyError(w, status, message)
+			}
 		}
 	}
 	if s.shuttingDown.Load() {
@@ -585,6 +589,16 @@ func (s *Server) forward(w http.ResponseWriter, r *http.Request, endpoint string
 			fail(400, "invalid_request", "failed to read body")
 		}
 		return
+	}
+	if anthropic != nil {
+		// Messages protocol: translate to a chat-completions body once,
+		// before metadata parsing, admission accounting and any upstream
+		// attempt. Everything downstream sees an ordinary chat request.
+		if err := anthropic.translateRequest(raw); err != nil {
+			fail(400, "invalid_request", err.Error())
+			return
+		}
+		raw = anthropic.body()
 	}
 	var metadata requestMetadata
 	if err := json.Unmarshal(raw, &metadata); err != nil {
@@ -761,12 +775,21 @@ func (s *Server) forward(w http.ResponseWriter, r *http.Request, endpoint string
 					acc = &sseReasoningAcc{}
 				}
 				absTimer := time.AfterFunc(maxPost200Duration, cancel)
-				err = streamCopyWithUsage(streamWriter, idle, func(i, o, c uint64) {
+				onUsage := func(i, o, c uint64) {
 					rec.TokIn, rec.TokOut, rec.TokCache, rec.UsageKnown = i, o, c, true
-				}, func() { rec.TTFTMs = float64(time.Since(start).Nanoseconds()) / 1e6 }, streamOptions{
-					aliasReasoning: !b.stripReasoning,
-					acc:            acc,
-				})
+				}
+				onFirst := func() { rec.TTFTMs = float64(time.Since(start).Nanoseconds()) / 1e6 }
+				if anthropic != nil {
+					// The Messages SSE translator writes Anthropic events
+					// directly to the committed writer; headers commit on
+					// its first event exactly like the passthrough path.
+					err = anthropic.streamCopier(streamWriter, idle, onUsage, onFirst)
+				} else {
+					err = streamCopyWithUsage(streamWriter, idle, onUsage, onFirst, streamOptions{
+						aliasReasoning: !b.stripReasoning,
+						acc:            acc,
+					})
+				}
 				budgetTimer.Stop()
 				absTimer.Stop()
 				idle.Close()
@@ -865,6 +888,13 @@ func (s *Server) forward(w http.ResponseWriter, r *http.Request, endpoint string
 				copyResponseHeaders(w, resp, false)
 				w.Header().Del("Content-Length") // Reasoning aliases can change the body length.
 				w.Header().Set("X-Request-ID", id)
+				if anthropic != nil && !spilled {
+					// Messages protocol: translate the complete chat body
+					// back to Messages shape. (Spilled oversized bodies
+					// stream through; translation requires the whole body.)
+					body = anthropic.translateResponse(body)
+					w.Header().Set("Content-Type", "application/json")
+				}
 				w.WriteHeader(http.StatusOK)
 				if spilled {
 					_, err = w.Write(sb.mem)

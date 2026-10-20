@@ -183,7 +183,7 @@ func TestSystemOneEndpointCompatibility(t *testing.T) {
 			s := runtimeTestServer(t, cfg)
 			w := httptest.NewRecorder()
 			body := `{"model":"test","state":"private-state","questions":{}` + tc.extra + `}`
-			s.forward(w, httptest.NewRequest(http.MethodPost, "/v1"+tc.endpoint, strings.NewReader(body)), tc.endpoint)
+			s.forward(w, httptest.NewRequest(http.MethodPost, "/v1"+tc.endpoint, strings.NewReader(body)), tc.endpoint, nil)
 			if w.Code != 400 || len(runtimeRecord(t, s).AttemptLog) != 0 {
 				t.Fatalf("incompatible request status=%d body=%s", w.Code, w.Body.String())
 			}

@@ -25,6 +25,11 @@ func (s *Server) handleModels(w http.ResponseWriter, r *http.Request) {
 		} else {
 			model = modelInfo{ID: id, Object: "model", Name: id, OwnedBy: target.Backend, Upstream: target.Upstream}
 		}
+		// display_name feeds Anthropic gateway model discovery (Claude
+		// Code's /model picker reads id + display_name + description).
+		if model.DisplayName == "" && model.Name != "" && model.Name != id {
+			model.DisplayName = model.Name
+		}
 		if model.Created == 0 {
 			model.Created = now
 		}

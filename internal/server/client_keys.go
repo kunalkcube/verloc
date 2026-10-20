@@ -124,10 +124,38 @@ func (s *Security) loadClientKeys() error {
 	return rows.Err()
 }
 
+// clientCredential extracts the presented client key. Anthropic-protocol
+// clients (Claude Code, Anthropic SDKs) send x-api-key rather than
+// Authorization: Bearer; OpenAI clients send Bearer. Both are vlk_ keys in
+// the same pool. A request presenting both headers must agree with itself.
+func clientCredential(r *http.Request) (string, bool) {
+	bearer := ""
+	if values := r.Header.Values("Authorization"); len(values) == 1 {
+		scheme, key, separated := strings.Cut(values[0], " ")
+		if separated && strings.EqualFold(scheme, "Bearer") {
+			bearer = key
+		}
+	} else if len(values) > 1 {
+		return "", false
+	}
+	xkey := r.Header.Get("x-api-key")
+	if bearer != "" && xkey != "" && bearer != xkey {
+		return "", false
+	}
+	key := bearer
+	if key == "" {
+		key = xkey
+	}
+	if len(key) != 47 || !strings.HasPrefix(key, "vlk_") {
+		return "", false
+	}
+	return key, true
+}
+
 func (s *Security) ClientMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		scheme, key, separated := strings.Cut(r.Header.Get("Authorization"), " ")
-		if len(r.Header.Values("Authorization")) != 1 || !separated || !strings.EqualFold(scheme, "Bearer") || len(key) != 47 || !strings.HasPrefix(key, "vlk_") {
+		key, ok := clientCredential(r)
+		if !ok {
 			w.Header().Set("WWW-Authenticate", "Bearer")
 			writeErr(w, http.StatusUnauthorized, "valid client API key required")
 			return

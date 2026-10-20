@@ -305,6 +305,11 @@ func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /v1/chat/completions", s.handleChat)
 	mux.HandleFunc("POST /chat/completions", s.handleChat)
+	mux.HandleFunc("POST /v1/messages", s.handleAnthropicMessages)
+	mux.HandleFunc("POST /messages", s.handleAnthropicMessages)
+	mux.HandleFunc("POST /v1/messages/count_tokens", s.handleAnthropicCountTokens)
+	mux.HandleFunc("POST /messages/count_tokens", s.handleAnthropicCountTokens)
+	mux.HandleFunc("HEAD /api/hello", func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusOK) })
 	mux.HandleFunc("POST /v1/responses", s.handleResponses)
 	mux.HandleFunc("POST /responses", s.handleResponses)
 	mux.HandleFunc("POST /v1/systemone", s.handleSystemOne)
@@ -367,7 +372,7 @@ func (s *Server) Handler() http.Handler {
 			w.Header().Set("Cache-Control", "no-store")
 		}
 		maxBody := int64(2 << 20)
-		if p == "/v1/chat/completions" || p == "/chat/completions" || p == "/v1/responses" || p == "/responses" || p == "/v1/systemone" || p == "/systemone" {
+		if p == "/v1/chat/completions" || p == "/chat/completions" || p == "/v1/responses" || p == "/responses" || p == "/v1/systemone" || p == "/systemone" || p == "/v1/messages" || p == "/messages" || p == "/v1/messages/count_tokens" || p == "/messages/count_tokens" {
 			maxBody = s.runtime().cfg.Limits.MaxBodyBytes
 		}
 		if r.Body != nil {
@@ -379,7 +384,9 @@ func (s *Server) Handler() http.Handler {
 		case p == "/v1/models", p == "/models":
 			// Public catalog. A presented client key still narrows the list to
 			// its allowed model scope; anonymous callers see every enabled model.
-			if s.security == nil || r.Header.Get("Authorization") == "" {
+			// Credential may arrive as Bearer (OpenAI clients) or x-api-key
+			// (Anthropic clients); absence of both means anonymous.
+			if s.security == nil || (r.Header.Get("Authorization") == "" && r.Header.Get("x-api-key") == "") {
 				mux.ServeHTTP(w, r)
 				return
 			}
@@ -390,7 +397,7 @@ func (s *Server) Handler() http.Handler {
 				return
 			}
 			admin.ServeHTTP(w, r)
-		case strings.HasPrefix(p, "/v1/"), p == "/models", p == "/pricing", p == "/chat/completions", p == "/responses", p == "/systemone":
+		case strings.HasPrefix(p, "/v1/"), p == "/models", p == "/pricing", p == "/chat/completions", p == "/responses", p == "/systemone", p == "/messages", strings.HasPrefix(p, "/messages/count_tokens"):
 			if client == nil {
 				writeErr(w, http.StatusUnauthorized, "gateway API key required")
 				return
